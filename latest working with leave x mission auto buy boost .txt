@@ -1,12 +1,50 @@
--- Only wait for Roblox/player basics
-repeat task.wait() until game:IsLoaded()
+-- ============================================================
+-- ULTRA-FAST BOOT
+-- Mission = minimal waits | Lobby = normal waits
+-- ============================================================
+local MAIN_MENU_ID_BOOT = 13379208636
+local LOBBY_ID_BOOT = 14916516914
+local TRADE_ID_BOOT = 14932214603
+local _pid = game.PlaceId
+local IS_MISSION_BOOT = (_pid ~= LOBBY_ID_BOOT and _pid ~= TRADE_ID_BOOT and _pid ~= MAIN_MENU_ID_BOOT)
+
+if not game:IsLoaded() then
+    if IS_MISSION_BOOT then
+        -- mission: don't spin long
+        local t = tick()
+        while not game:IsLoaded() and (tick() - t) < 2 do task.wait() end
+        if not game:IsLoaded() then game.Loaded:Wait() end
+    else
+        local bootAttempts = 0
+        while not game:IsLoaded() and bootAttempts < 2 do
+            bootAttempts += 1
+            task.wait(0.25)
+        end
+        if not game:IsLoaded() then game.Loaded:Wait() end
+    end
+end
 
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
+if not player then
+    if IS_MISSION_BOOT then
+        local t = tick()
+        while not player and (tick() - t) < 2 do
+            player = Players.LocalPlayer
+            task.wait()
+        end
+    end
+    if not player then
+        repeat task.wait() player = Players.LocalPlayer until player
+    end
+end
 
-repeat task.wait() until player
+-- Mission: FindFirstChild first (no long WaitForChild block)
+local PlayerGui = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", IS_MISSION_BOOT and 2 or 10)
 
-local PlayerGui = player:WaitForChild("PlayerGui")
+task.defer(function()
+    if not game:IsLoaded() then game.Loaded:Wait() end
+end)
 
 -- Lobby-only loader (only runs checks in lobby place)
 _G.LobbyUILoaded = false
@@ -158,15 +196,18 @@ task.spawn(function()
 end)
 
 
-repeat task.wait() until game:IsLoaded()
-repeat task.wait() until game:GetService("Players").LocalPlayer
-repeat task.wait() until game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+-- Already past boot above — only re-check if needed
+if not game:IsLoaded() then game.Loaded:Wait() end
+if not Players.LocalPlayer then
+    repeat task.wait() until Players.LocalPlayer
+end
+PlayerGui = Players.LocalPlayer:FindFirstChild("PlayerGui") or Players.LocalPlayer:WaitForChild("PlayerGui", 3)
 
--- Mission / non-lobby: don't block long. Lobby can wait for full Interface.
+-- Interface wait: LOBBY only long | MISSION almost instant
 do
     local pid = game.PlaceId
     local isLobbyPlace = (pid == 14916516914 or pid == 14932214603)
-    local pg = game:GetService("Players").LocalPlayer.PlayerGui
+    local pg = Players.LocalPlayer.PlayerGui
     if isLobbyPlace then
         local t0 = tick()
         while not pg:FindFirstChild("Interface") and (tick() - t0) < 30 do
@@ -174,12 +215,12 @@ do
         end
         task.wait(0.5)
     else
-        -- INSIDE MISSION / main menu: fast path
+        -- MISSION / main menu: max ~0.4s total, no settle sleep
         local t0 = tick()
-        while not pg:FindFirstChild("Interface") and (tick() - t0) < 5 do
-            task.wait(0.05)
+        while not pg:FindFirstChild("Interface") and (tick() - t0) < 0.4 do
+            task.wait()
         end
-        task.wait(0.1) -- minimal settle
+        -- zero settle — farm tabs can start immediately
     end
 end
 
@@ -216,11 +257,20 @@ pcall(function()
     UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 end)
 local Player = Players.LocalPlayer
-local PlayerGui = Player:WaitForChild("PlayerGui")
+local PlayerGui = Player:FindFirstChild("PlayerGui") or Player:WaitForChild("PlayerGui", 3)
 
-local Assets = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Remotes")
-local POST = Assets:WaitForChild("POST")
-local GET = Assets:WaitForChild("GET")
+local Assets
+do
+    local a = ReplicatedStorage:FindFirstChild("Assets")
+    if a then
+        Assets = a:FindFirstChild("Remotes")
+    end
+    if not Assets then
+        Assets = ReplicatedStorage:WaitForChild("Assets", 5):WaitForChild("Remotes", 5)
+    end
+end
+local POST = Assets:FindFirstChild("POST") or Assets:WaitForChild("POST", 3)
+local GET = Assets:FindFirstChild("GET") or Assets:WaitForChild("GET", 3)
 
 local function SafeInvoke(remote, ...)
     local args = {...}
@@ -365,7 +415,7 @@ do
                     break
                 end
             end
-            task.wait(0.3)
+            task.wait(0.15)
         end
         if not _G.LobbyUILoaded then
             print("[Lobby] Timeout — opening menu anyway")
@@ -657,7 +707,7 @@ if IsLobbyLobby() then
                         if useBoost(boughtName, false) then break end
                         task.wait(0.35)
                     end
-                    task.wait(0.3)
+                    task.wait(0.15)
                     if isBoostActive(boostType) then
                         Library:Notify("[Boost] Gold active", 2)
                     end
@@ -787,7 +837,89 @@ if IsLobbyLobby() then
 end
 
 -- ============================================================
--- Auto Delete Perks (works in lobby without opening Equipment)
+-- Auto Sell Cosmetics (Lobby Only)
+-- ============================================================
+if IsLobbyLobby() then
+    task.spawn(function()
+        while not Tabs.Session do task.wait(0.1) end
+        task.wait(0.4)
+
+        local SellGroup = Tabs.Session:AddRightGroupbox("Auto Sell Cosmetics")
+
+        local GET = game:GetService("ReplicatedStorage")
+            :WaitForChild("Assets")
+            :WaitForChild("Remotes")
+            :WaitForChild("GET")
+
+        local Cosmetics = {
+            "Altar Chains",
+            "Angel's Halo",
+            "Hardened Shield",
+            "Kitsune Mask"
+        }
+
+        local enabled = false
+        local repeatCount = 3
+        local sellDelay = 0.25
+
+        local function SellCosmetic(name)
+            pcall(function()
+                GET:InvokeServer(
+                    "S_Inventory",
+                    "Sell",
+                    name,
+                    1
+                )
+            end)
+        end
+
+        task.spawn(function()
+            while task.wait(0.5) do
+                if enabled then
+                    for _, name in ipairs(Cosmetics) do
+                        for i = 1, repeatCount do
+                            SellCosmetic(name)
+                            task.wait(sellDelay)
+                        end
+                    end
+                end
+            end
+        end)
+
+        SellGroup:AddToggle("AutoSellCosmetics", {
+            Text = "Auto Sell Cosmetics",
+            Default = false,
+            Callback = function(v)
+                enabled = v
+            end
+        })
+
+        SellGroup:AddSlider("AutoSellRepeat", {
+            Text = "Repeat Count",
+            Default = 3,
+            Min = 1,
+            Max = 10,
+            Rounding = 0,
+            Callback = function(v)
+                repeatCount = v
+            end
+        })
+
+        SellGroup:AddSlider("AutoSellDelay", {
+            Text = "Sell Delay",
+            Default = 0.25,
+            Min = 0.05,
+            Max = 2,
+            Rounding = 2,
+            Callback = function(v)
+                sellDelay = v
+            end
+        })
+    end)
+end
+
+-- ============================================================
+-- Auto Delete Perks (Batch - One Remote)
 -- ============================================================
 if IsLobbyLobby() then
     task.spawn(function()
@@ -838,294 +970,198 @@ if IsLobbyLobby() then
             Common = true,
             Rare = true,
             Epic = false,
-            Legendary = false,
+            Legendary = true,
             Secret = false,
         }
 
-        local deleteDelay = 0.2
+        local deleteDelay = 0.15
         local autoEnabled = false
-        local autoInterval = 15
+        local autoInterval = 20
         local isDeleting = false
+        local maxPerBatch = 25
 
         local function resolveRarity(perkName)
-            if not perkName or perkName == "" then return nil end
+            if not perkName or perkName == "" then return "Common" end
             if NameToRarity[perkName] then return NameToRarity[perkName] end
             local lower = string.lower(perkName)
             if NameToRarity[lower] then return NameToRarity[lower] end
-            -- partial match fallback
-            for name, rarity in pairs(NameToRarity) do
-                if type(name) == "string" and #name > 3 then
-                    if lower:find(string.lower(name), 1, true) or string.lower(name):find(lower, 1, true) then
-                        return rarity
-                    end
-                end
-            end
-            return nil
-        end
-
-        local function extractPerkName(instanceName)
-            if not instanceName then return nil end
-            -- K_800_PerkName
-            local n = instanceName:match("^K_%d+_(.+)$")
-            if n then return n end
-            -- K_PerkName
-            n = instanceName:match("^K_(.+)$")
-            if n and not tonumber(n:match("^%d+")) then return n end
-            -- trailing after last underscore if looks like perk
-            n = instanceName:match("_(%a[%w%s%-%']+)$")
-            if n then return n end
-            return instanceName
-        end
-
-        local function getId(obj)
-            if not obj then return nil end
-            local id = obj:GetAttribute("ID") or obj:GetAttribute("Id") or obj:GetAttribute("id")
-                or obj:GetAttribute("UUID") or obj:GetAttribute("Uuid")
-            if id then return tostring(id) end
-            return nil
-        end
-
-        -- Try server remotes that may return perk lists with UUIDs
-        local function collectFromRemotes()
-            local found = {}
-            local seen = {}
-
-            local function add(id, name)
-                if not id or seen[tostring(id)] then return end
-                local perkName = type(name) == "string" and name or tostring(name or "")
-                perkName = extractPerkName(perkName) or perkName
-                local rarity = resolveRarity(perkName)
-                if rarity then
-                    seen[tostring(id)] = true
-                    table.insert(found, { id = tostring(id), name = perkName, rarity = rarity })
-                end
-            end
-
-            local function walk(tbl, depth)
-                if depth > 10 or type(tbl) ~= "table" then return end
-                local name = tbl.Name or tbl.Perk or tbl.Title or tbl.PerkName or tbl.Item or tbl.DisplayName
-                local id = tbl.ID or tbl.Id or tbl.UUID or tbl.Uuid or tbl.id or tbl.Uid
-                if (type(name) == "string" or type(name) == "number") and id then
-                    add(id, tostring(name))
-                end
-                for k, v in pairs(tbl) do
-                    if type(v) == "table" then
-                        walk(v, depth + 1)
-                    elseif type(k) == "string" and type(v) == "string" then
-                        if resolveRarity(v) and #k >= 8 then
-                            add(k, v)
-                        elseif resolveRarity(k) and #v >= 8 then
-                            add(v, k)
-                        elseif resolveRarity(extractPerkName(v) or "") and #k >= 8 then
-                            add(k, v)
-                        end
-                    end
-                end
-            end
-
-            local attempts = {
-                function() return GET:InvokeServer("S_Equipment", "Perks") end,
-                function() return GET:InvokeServer("S_Equipment", "Get", "Perk") end,
-                function() return GET:InvokeServer("S_Equipment", "List", "Perk") end,
-                function() return GET:InvokeServer("S_Equipment", "Data") end,
-                function() return GET:InvokeServer("S_Equipment", "Inventory") end,
-                function() return GET:InvokeServer("S_Equipment", "Talents") end,
-                function() return GET:InvokeServer("Data", "Copy") end,
-            }
-
-            for _, fn in ipairs(attempts) do
-                local ok, result = pcall(fn)
-                if ok and result ~= nil then
-                    if type(result) == "table" then
-                        walk(result, 0)
-                    end
-                end
-                if #found > 0 then break end
-            end
-
-            return found
-        end
-
-        -- Silently load Equipment GUI in background so Items populate, then read IDs
-        local function silentLoadEquipmentGui()
-            local restored = {}
-
-            local function show(obj)
-                if not obj then return end
-                pcall(function()
-                    if obj:IsA("ScreenGui") then
-                        restored[#restored+1] = { obj = obj, key = "Enabled", val = obj.Enabled }
-                        obj.Enabled = true
-                    elseif obj:IsA("GuiObject") then
-                        restored[#restored+1] = { obj = obj, key = "Visible", val = obj.Visible }
-                        obj.Visible = true
-                    end
-                end)
-            end
-
-            pcall(function()
-                local pg = Player.PlayerGui
-                local interface = pg:FindFirstChild("Interface")
-                if not interface then return end
-                show(interface)
-                local equipment = interface:FindFirstChild("Equipment")
-                if equipment then
-                    show(equipment)
-                    local perkList = equipment:FindFirstChild("Perk_List")
-                    if perkList then
-                        show(perkList)
-                        local holder = perkList:FindFirstChild("Holder")
-                        if holder then show(holder) end
-                    end
-                end
-            end)
-
-            -- some games need a remote touch to populate the list
-            pcall(function() GET:InvokeServer("S_Equipment", "Perks") end)
-            pcall(function() GET:InvokeServer("S_Equipment", "Talents") end)
-
-            -- wait for Items to fill
-            local items = nil
-            local t0 = tick()
-            while tick() - t0 < 2.5 do
-                local ok, folder = pcall(function()
-                    return Player.PlayerGui.Interface.Equipment.Perk_List.Holder.Items
-                end)
-                if ok and folder and #folder:GetChildren() > 0 then
-                    items = folder
-                    break
-                end
-                task.wait(0.15)
-            end
-
-            return items, restored
-        end
-
-        local function restoreGui(restored)
-            for i = #restored, 1, -1 do
-                local e = restored[i]
-                pcall(function()
-                    if e.key == "Enabled" then
-                        e.obj.Enabled = e.val
-                    else
-                        e.obj.Visible = e.val
-                    end
-                end)
-            end
-        end
-
-        local function collectFromGuiFolder(itemsFolder)
-            local found = {}
-            local seen = {}
-            if not itemsFolder then return found end
-
-            for _, obj in ipairs(itemsFolder:GetChildren()) do
-                local id = getId(obj)
-                if id and not seen[id] then
-                    local perkName = extractPerkName(obj.Name)
-                    local rarity = resolveRarity(perkName)
-                    if rarity then
-                        seen[id] = true
-                        table.insert(found, { id = id, name = perkName, rarity = rarity })
-                    end
-                end
-            end
-
-            -- also scan descendants in case structure is nested
-            if #found == 0 then
-                for _, obj in ipairs(itemsFolder:GetDescendants()) do
-                    local id = getId(obj)
-                    if id and not seen[id] then
-                        local perkName = extractPerkName(obj.Name)
-                        local rarity = resolveRarity(perkName)
-                        if rarity then
-                            seen[id] = true
-                            table.insert(found, { id = id, name = perkName, rarity = rarity })
-                        end
-                    end
-                end
-            end
-            return found
+            return "Common"
         end
 
         local function collectAllPerks()
-            -- 1) Server remotes / Data.Copy first (no UI)
-            local list = collectFromRemotes()
-            if #list > 0 then return list, "remote" end
+            local found = {}
+            local seen = {}
 
-            -- 2) Already-loaded GUI path
-            local ok, folder = pcall(function()
-                return Player.PlayerGui.Interface.Equipment.Perk_List.Holder.Items
+            local ok, data = pcall(function()
+                return GET:InvokeServer("S_Equipment", "Talents")
             end)
-            if ok and folder and #folder:GetChildren() > 0 then
-                list = collectFromGuiFolder(folder)
-                if #list > 0 then return list, "gui" end
-            end
 
-            -- 3) Silent background load of Equipment UI, read, restore
-            local items, restored = silentLoadEquipmentGui()
-            list = collectFromGuiFolder(items)
-            if #list == 0 then
-                -- deep scan after silent open
-                pcall(function()
-                    for _, obj in ipairs(Player.PlayerGui:GetDescendants()) do
-                        if type(obj.Name) == "string" and obj.Name:match("^K_%d+_") then
-                            local id = getId(obj)
-                            if id then
-                                local perkName = extractPerkName(obj.Name)
-                                local rarity = resolveRarity(perkName)
-                                if rarity then
-                                    table.insert(list, { id = id, name = perkName, rarity = rarity })
-                                end
+            if ok and type(data) == "table" then
+                local function tryStorage(storage)
+                    if type(storage) ~= "table" then return end
+                    for uid, info in pairs(storage) do
+                        if type(uid) == "string" and #uid > 15 and not seen[uid] then
+                            local name = "Unknown"
+                            if type(info) == "table" then
+                                name = info.Name or info.Perk or info.Title or "Unknown"
+                            elseif type(info) == "string" then
+                                name = info
                             end
+                            seen[uid] = true
+                            table.insert(found, {
+                                id = uid,
+                                name = tostring(name),
+                                rarity = resolveRarity(tostring(name))
+                            })
                         end
                     end
-                end)
-            end
-            restoreGui(restored or {})
+                end
 
-            if #list > 0 then return list, "silent-gui" end
-            return {}, "none"
+                if data.Slots then
+                    for _, slotKey in ipairs({"A", "B", "C", data.Current_Slot or "A"}) do
+                        local slot = data.Slots[slotKey]
+                        if type(slot) == "table" and type(slot.Perks) == "table" then
+                            tryStorage(slot.Perks.Storage)
+                            tryStorage(slot.Perks.Inventory)
+                            tryStorage(slot.Perks)
+                        end
+                    end
+                end
+                tryStorage(data.Storage)
+                tryStorage(data.Perks)
+            end
+
+            -- Always cache for standalone printer / other features
+            getgenv().LastPerkList = found
+            local idsOnly = {}
+            for _, e in ipairs(found) do
+                table.insert(idsOnly, e.id)
+            end
+            getgenv().CachedPerkIds = idsOnly
+            getgenv().CachedPerkList = found
+
+            return found
         end
 
-        local function deletePerk(id, name)
+        -- Expose for other tabs / standalone
+        getgenv().TownShip_CollectAllPerks = collectAllPerks
+
+        local function deleteBatch(ids)
+            if #ids == 0 then return false end
             local ok = pcall(function()
-                GET:InvokeServer("S_Equipment", "Delete", "Perk", { id })
+                GET:InvokeServer("S_Equipment", "Delete", "Perk", ids)
             end)
             return ok
+        end
+
+        -- Always fetch fresh IDs (they change after every delete)
+        local function loadPerkListForDelete()
+            print("[Perks] Collecting live perk list...")
+            local live = collectAllPerks()
+            return live or {}, "live"
         end
 
         local function runDeletePerks(silent)
             if isDeleting then return end
             isDeleting = true
 
-            local list, source = collectAllPerks()
+            local list = loadPerkListForDelete()
+
+            print(string.format("[Perks] Delete pipeline list = %d perk(s)", #list))
+            for i, entry in ipairs(list) do
+                print(string.format("[Perks][%03d] %s | %s | %s", i, entry.id, entry.name, entry.rarity))
+            end
 
             if #list == 0 then
                 if not silent then
-                    Library:Notify("No perks found — try once in Equipment, or capture list remote", 4)
+                    Library:Notify("No perks found", 3)
                 end
                 isDeleting = false
                 return
             end
 
-            local deleted, skipped = 0, 0
+            -- Sync toggles from Options
+            pcall(function()
+                if Options then
+                    if Options.PerkDel_Common then targetRarities.Common = Options.PerkDel_Common.Value end
+                    if Options.PerkDel_Rare then targetRarities.Rare = Options.PerkDel_Rare.Value end
+                    if Options.PerkDel_Epic then targetRarities.Epic = Options.PerkDel_Epic.Value end
+                    if Options.PerkDel_Legendary then targetRarities.Legendary = Options.PerkDel_Legendary.Value end
+                    if Options.PerkDel_Secret then targetRarities.Secret = Options.PerkDel_Secret.Value end
+                end
+            end)
+
+            local toDelete = {}
+            local deleteBreakdown = { Common = 0, Rare = 0, Epic = 0, Legendary = 0, Secret = 0 }
             for _, entry in ipairs(list) do
-                if targetRarities[entry.rarity] then
-                    if deletePerk(entry.id, entry.name) then
-                        deleted = deleted + 1
-                        task.wait(deleteDelay)
+                local r = entry.rarity
+                if targetRarities[r] then
+                    table.insert(toDelete, entry.id)
+                    if deleteBreakdown[r] then
+                        deleteBreakdown[r] = deleteBreakdown[r] + 1
                     end
-                else
-                    skipped = skipped + 1
                 end
             end
 
-            if deleted > 0 or not silent then
-                Library:Notify(string.format("Deleted %d | Skipped %d (%s)", deleted, skipped, source), 3)
+            getgenv().LastDeletePerkIds = toDelete
+            getgenv().LastDeleteBreakdown = deleteBreakdown
+
+            if #toDelete == 0 then
+                if not silent then
+                    Library:Notify("No matching rarities selected to delete", 3)
+                end
+                isDeleting = false
+                return
             end
+
+            print(string.format(
+                "[Perks] Will DELETE %d | Common=%d Rare=%d Epic=%d Legendary=%d Secret=%d",
+                #toDelete,
+                deleteBreakdown.Common, deleteBreakdown.Rare, deleteBreakdown.Epic,
+                deleteBreakdown.Legendary, deleteBreakdown.Secret
+            ))
+            print("[Perks] Selected toggles:",
+                "Common=" .. tostring(targetRarities.Common),
+                "Rare=" .. tostring(targetRarities.Rare),
+                "Epic=" .. tostring(targetRarities.Epic),
+                "Legendary=" .. tostring(targetRarities.Legendary),
+                "Secret=" .. tostring(targetRarities.Secret)
+            )
+
+            local deleted = 0
+
+            for i = 1, #toDelete, maxPerBatch do
+                local batch = {}
+                for j = i, math.min(i + maxPerBatch - 1, #toDelete) do
+                    table.insert(batch, toDelete[j])
+                end
+
+                if deleteBatch(batch) then
+                    deleted = deleted + #batch
+                else
+                    for _, id in ipairs(batch) do
+                        pcall(function()
+                            GET:InvokeServer("S_Equipment", "Delete", "Perk", {id})
+                        end)
+                        deleted = deleted + 1
+                        task.wait(0.12)
+                    end
+                end
+
+                task.wait(deleteDelay)
+            end
+
+            if deleted > 0 or not silent then
+                Library:Notify(string.format("Deleted %d perks", deleted), 3)
+            end
+
             isDeleting = false
         end
+
+        -- expose to Perk Counter tab / other scripts
+        getgenv().TownShip_RunDeletePerks = runDeletePerks
+        getgenv().TownShip_TargetRarities = targetRarities
+        getgenv().TownShip_CollectAllPerks = collectAllPerks
 
         -- UI
         PerkGroup:AddToggle("PerkDel_Common", {
@@ -1145,7 +1181,7 @@ if IsLobbyLobby() then
         })
         PerkGroup:AddToggle("PerkDel_Legendary", {
             Text = "Delete Legendary",
-            Default = false,
+            Default = true,
             Callback = function(v) targetRarities.Legendary = v end
         })
         PerkGroup:AddToggle("PerkDel_Secret", {
@@ -1157,8 +1193,8 @@ if IsLobbyLobby() then
         PerkGroup:AddDivider()
 
         PerkGroup:AddSlider("PerkDel_Delay", {
-            Text = "Delete Delay",
-            Default = 0.2,
+            Text = "Batch Delay",
+            Default = 0.15,
             Min = 0.05,
             Max = 1,
             Rounding = 2,
@@ -1168,7 +1204,7 @@ if IsLobbyLobby() then
 
         PerkGroup:AddSlider("PerkDel_Interval", {
             Text = "Auto Interval",
-            Default = 15,
+            Default = 20,
             Min = 5,
             Max = 120,
             Rounding = 0,
@@ -1203,7 +1239,695 @@ if IsLobbyLobby() then
             task.spawn(function() runDeletePerks(false) end)
         end)
 
-        PerkGroup:AddLabel("Auto loads perks in background — stay in lobby.")
+        PerkGroup:AddLabel("Uses batch delete (one remote)")
+    end)
+end
+
+-- ============================================================
+-- Auto Perk Counter (UI + rarity breakdown)
+-- Hide GUI → wait 1s → check → report Common/Rare/Epic/Legendary/Secret
+-- ============================================================
+if IsLobbyLobby() then
+    task.spawn(function()
+        while not Tabs.Session do task.wait(0.1) end
+        task.wait(0.45)
+
+        local PerkCountGroup = Tabs.Session:AddLeftGroupbox("Perk Counter")
+
+        local Cam = workspace.CurrentCamera
+
+        getgenv().LastPerkCount = getgenv().LastPerkCount or nil
+        getgenv().LastPerkMax = getgenv().LastPerkMax or nil
+        getgenv().LastPerkBreakdown = getgenv().LastPerkBreakdown or nil
+
+        -- Rarity lists (same as Auto Delete Perks)
+        local PerkRarityLists = {
+            Legendary = {
+                "Peerless Commander","Indefatigable","Tyrant's Stare","Invincible","Eviscerate",
+                "Font of Vitality","Flame Rhapsody","Robust","Sixth Sense","Gear Master",
+                "Carnifex","Munitions Master","Sanctified","Wind Rhapsody","Peerless Constitution",
+                "Exhumation","Warchief","Peerless Focus","Perfect Form","Courage Catalyst",
+                "Aegis","Unparalleled Strength","Perfect Soul"
+            },
+            Common = {
+                "Cripple","Lucky","Enhanced Metabolism","First Aid","Mighty",
+                "Fortitude","Hollow","Gear Beginner","Enduring"
+            },
+            Epic = {
+                "Munitions Expert","Gear Expert","Butcher","Resilient","Speedy",
+                "Reckless Abandon","Focus","Stalwart Durability","Adrenaline","Safeguard",
+                "Warrior","Solo","Mutilate","Trauma Battery","Hardy",
+                "Unbreakable","Siphoning","Flawed Release","Luminous","Peerless Strength"
+            },
+            Rare = {
+                "Blessed","Gear Intermediate","Unyielding","Fully Stocked","Forceful",
+                "Lightweight","Protection","Mangle","Experimental Shells","Critical Hunter",
+                "Tough","Heightened Vitality"
+            },
+            Secret = {
+                "Everlasting Flame","Heavenly Restriction","Adaptation","Maximum Firepower",
+                "Soulfeed","Kengo","Black Flash","Font of Inspiration","Explosive Fortune",
+                "Immortal","Art of War","Tatsujin","Founder's Blessing","Unwavering Belief"
+            },
+            Mythic = {
+                -- reserved if game adds mythic perks later
+            },
+        }
+
+        local PerkNameToRarity = {}
+        for rarity, list in pairs(PerkRarityLists) do
+            for _, name in ipairs(list) do
+                PerkNameToRarity[name] = rarity
+                PerkNameToRarity[string.lower(name)] = rarity
+            end
+        end
+
+        local function resolvePerkRarity(perkName)
+            if not perkName or perkName == "" then return "Common" end
+            if PerkNameToRarity[perkName] then return PerkNameToRarity[perkName] end
+            local lower = string.lower(perkName)
+            if PerkNameToRarity[lower] then return PerkNameToRarity[lower] end
+            -- soft match by known rarity keywords in remote data
+            return "Common"
+        end
+
+        local function collectPerksFromRemote()
+            local found = {}
+            local seen = {}
+            local ok, data = pcall(function()
+                return GET:InvokeServer("S_Equipment", "Talents")
+            end)
+            if not ok or type(data) ~= "table" then
+                return found
+            end
+
+            local function tryStorage(storage)
+                if type(storage) ~= "table" then return end
+                for uid, info in pairs(storage) do
+                    if type(uid) == "string" and #uid > 10 and not seen[uid] then
+                        local name = "Unknown"
+                        local rarityFromData = nil
+                        if type(info) == "table" then
+                            name = info.Name or info.Perk or info.Title or info.Id or "Unknown"
+                            rarityFromData = info.Rarity or info.Tier or info.Quality
+                        elseif type(info) == "string" then
+                            name = info
+                        end
+                        seen[uid] = true
+                        local rarity = nil
+                        if type(rarityFromData) == "string" and rarityFromData ~= "" then
+                            local r = rarityFromData
+                            -- normalize
+                            if r:lower():find("secret") then rarity = "Secret"
+                            elseif r:lower():find("myth") then rarity = "Mythic"
+                            elseif r:lower():find("legend") then rarity = "Legendary"
+                            elseif r:lower():find("epic") then rarity = "Epic"
+                            elseif r:lower():find("rare") then rarity = "Rare"
+                            elseif r:lower():find("common") then rarity = "Common"
+                            end
+                        end
+                        if not rarity then
+                            rarity = resolvePerkRarity(tostring(name))
+                        end
+                        table.insert(found, {
+                            id = uid,
+                            name = tostring(name),
+                            rarity = rarity
+                        })
+                    end
+                end
+            end
+
+            -- common paths
+            if data.Slots then
+                for _, slotKey in ipairs({"A", "B", "C", data.Current_Slot or "A"}) do
+                    local slot = data.Slots[slotKey]
+                    if slot and slot.Perks then
+                        tryStorage(slot.Perks.Storage)
+                        tryStorage(slot.Perks.Inventory)
+                        tryStorage(slot.Perks)
+                    end
+                end
+            end
+            tryStorage(data.Storage)
+            tryStorage(data.Perks)
+            tryStorage(data.Inventory)
+
+            -- deep soft scan for tables that look like perk storage
+            local function softScan(tbl, depth)
+                if type(tbl) ~= "table" or depth > 4 then return end
+                for k, v in pairs(tbl) do
+                    if type(k) == "string" and #k > 20 and type(v) == "table" and (v.Name or v.Perk or v.Title) then
+                        if not seen[k] then
+                            seen[k] = true
+                            local name = v.Name or v.Perk or v.Title or "Unknown"
+                            local rarity = resolvePerkRarity(tostring(name))
+                            if type(v.Rarity) == "string" then
+                                local r = v.Rarity:lower()
+                                if r:find("secret") then rarity = "Secret"
+                                elseif r:find("myth") then rarity = "Mythic"
+                                elseif r:find("legend") then rarity = "Legendary"
+                                elseif r:find("epic") then rarity = "Epic"
+                                elseif r:find("rare") then rarity = "Rare"
+                                elseif r:find("common") then rarity = "Common"
+                                end
+                            end
+                            table.insert(found, { id = k, name = tostring(name), rarity = rarity })
+                        end
+                    elseif type(v) == "table" then
+                        softScan(v, depth + 1)
+                    end
+                end
+            end
+            if #found == 0 then
+                softScan(data, 0)
+            end
+
+            return found
+        end
+
+        local function countByRarity(list)
+            local counts = {
+                Common = 0,
+                Rare = 0,
+                Epic = 0,
+                Legendary = 0,
+                Secret = 0,
+                Mythic = 0,
+                Unknown = 0,
+            }
+            for _, entry in ipairs(list) do
+                local r = entry.rarity or "Unknown"
+                if counts[r] ~= nil then
+                    counts[r] = counts[r] + 1
+                else
+                    counts.Unknown = counts.Unknown + 1
+                end
+            end
+            counts.Total = #list
+            return counts
+        end
+
+        local function formatBreakdown(counts)
+            return string.format(
+                "Total: %d\nCommon: %d\nRare: %d\nEpic: %d\nLegendary: %d\nSecret: %d\nMythic: %d",
+                counts.Total or 0,
+                counts.Common or 0,
+                counts.Rare or 0,
+                counts.Epic or 0,
+                counts.Legendary or 0,
+                counts.Secret or 0,
+                counts.Mythic or 0
+            )
+        end
+
+        local function clickXY(x, y)
+            pcall(function()
+                VIM:SendMouseMoveEvent(x, y, game)
+                task.wait(0.01)
+                VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.03)
+                VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+        end
+
+        local function fire(obj)
+            if not obj then return end
+            pcall(function()
+                if firesignal then
+                    pcall(function() firesignal(obj.Activated) end)
+                    pcall(function() firesignal(obj.MouseButton1Click) end)
+                    pcall(function() firesignal(obj.MouseButton1Down) end)
+                end
+                local inset = GuiService:GetGuiInset()
+                local size = obj.AbsoluteSize
+                if size.X > 1 and size.Y > 1 then
+                    local pos = obj.AbsolutePosition
+                    clickXY(pos.X + size.X / 2 + inset.X, pos.Y + size.Y / 2 + inset.Y)
+                end
+            end)
+        end
+
+        local function getPath(parts)
+            local cur = Player.PlayerGui
+            for _, name in ipairs(parts) do
+                if not cur then return nil end
+                cur = cur:FindFirstChild(name)
+            end
+            return cur
+        end
+
+        local function parseLimit(text)
+            if type(text) ~= "string" then return nil, nil end
+            local a = text:match("(%d+[%,%d]*)%s*/")
+            local b = text:match("/%s*(%d+[%,%d]*)")
+            local cur = a and tonumber((a:gsub(",", ""))) or nil
+            local max = b and tonumber((b:gsub(",", ""))) or nil
+            if max and max < 50 then
+                max = nil
+            end
+            return cur, max
+        end
+
+        local function getLimitLabel()
+            return getPath({"Interface", "Equipment", "Perk", "Limit"})
+        end
+
+        local function readLive()
+            local label = getLimitLabel()
+            if not label then return nil, nil, nil end
+            local cur, max = parseLimit(label.Text)
+            return cur, max, label.Text
+        end
+
+        local function isVisible(obj)
+            if not obj then return false end
+            local ok, vis = pcall(function()
+                if not obj:IsA("GuiObject") then return false end
+                if not obj.Visible then return false end
+                if obj.AbsoluteSize.X < 4 or obj.AbsoluteSize.Y < 4 then return false end
+                -- ancestors must be visible too
+                local p = obj
+                while p do
+                    if p:IsA("GuiObject") and p.Visible == false then return false end
+                    if p:IsA("ScreenGui") and p.Enabled == false then return false end
+                    p = p.Parent
+                end
+                return true
+            end)
+            return ok and vis
+        end
+
+        -- Strict: need visible Equipment category on topbar (default view has SWITCH LOBBY only)
+        local function isEquipmentUIReady()
+            local equipTab =
+                getPath({"Interface", "Topbar", "Main", "Categories", "Equipment"})
+                or getPath({"Interface", "Topbar", "Main", "Equipment"})
+            if isVisible(equipTab) then return true end
+
+            local cats = getPath({"Interface", "Topbar", "Main", "Categories"})
+            if cats and isVisible(cats) then
+                for _, ch in ipairs(cats:GetChildren()) do
+                    local n = string.lower(ch.Name)
+                    if (n:find("equip") or n:find("gear")) and isVisible(ch) then
+                        return true
+                    end
+                end
+            end
+            return false
+        end
+
+        local function pressTab()
+            print("[Perks] Pressing Tab key...")
+            pcall(function()
+                -- several methods for different executors
+                VIM:SendKeyEvent(true, Enum.KeyCode.Tab, false, game)
+                task.wait(0.05)
+                VIM:SendKeyEvent(false, Enum.KeyCode.Tab, false, game)
+            end)
+            task.wait(0.05)
+            pcall(function()
+                VIM:SendKeyEvent(true, Enum.KeyCode.Tab, false, game)
+                task.wait(0.05)
+                VIM:SendKeyEvent(false, Enum.KeyCode.Tab, false, game)
+            end)
+            -- keycode number fallback (9 = Tab)
+            pcall(function()
+                VIM:SendKeyEvent(true, 9, false, game)
+                task.wait(0.05)
+                VIM:SendKeyEvent(false, 9, false, game)
+            end)
+        end
+
+        local function clickSwitchLobbyButton()
+            local pg = Player and Player:FindFirstChild("PlayerGui")
+            if not pg then return false end
+
+            local candidates = {}
+            for _, d in ipairs(pg:GetDescendants()) do
+                local text = nil
+                pcall(function()
+                    if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                        text = d.Text
+                    end
+                end)
+                if type(text) == "string" then
+                    local up = text:upper()
+                    if up:find("SWITCH") and up:find("LOBBY") then
+                        table.insert(candidates, d)
+                    end
+                end
+                -- also match by name
+                if d.Name:upper():find("SWITCH") and d.Name:upper():find("LOBBY") then
+                    table.insert(candidates, d)
+                end
+            end
+
+            for _, d in ipairs(candidates) do
+                local clickTarget = d
+                -- climb to a clickable parent
+                local p = d
+                for _ = 1, 4 do
+                    if not p then break end
+                    if p:IsA("TextButton") or p:IsA("ImageButton") then
+                        clickTarget = p
+                        break
+                    end
+                    p = p.Parent
+                end
+                if isVisible(clickTarget) or isVisible(d) then
+                    print("[Perks] Clicking SWITCH LOBBY:", clickTarget:GetFullName())
+                    fire(clickTarget)
+                    fire(d)
+                    return true
+                end
+            end
+
+            -- last resort: click any found even if visibility check failed
+            if #candidates > 0 then
+                local d = candidates[1]
+                print("[Perks] Force click SWITCH LOBBY:", d:GetFullName())
+                fire(d)
+                if d.Parent then fire(d.Parent) end
+                return true
+            end
+            return false
+        end
+
+        local function ensureEquipmentLobby()
+            if isEquipmentUIReady() then
+                print("[Perks] Equipment UI already visible")
+                return true
+            end
+
+            print("[Perks] Equipment NOT visible (default view) — will SWITCH LOBBY / Tab")
+
+            -- 1) click button if found
+            local clicked = clickSwitchLobbyButton()
+            print("[Perks] SWITCH LOBBY button clicked:", clicked)
+            task.wait(0.9)
+            if isEquipmentUIReady() then
+                print("[Perks] Equipment ready after button")
+                return true
+            end
+
+            -- 2) Tab key x3 with waits
+            for i = 1, 3 do
+                pressTab()
+                task.wait(0.7)
+                if isEquipmentUIReady() then
+                    print("[Perks] Equipment ready after Tab #" .. i)
+                    return true
+                end
+            end
+
+            -- 3) try button again after tabs
+            clickSwitchLobbyButton()
+            task.wait(0.8)
+
+            local ready = isEquipmentUIReady()
+            print("[Perks] Equipment ready final:", ready)
+            return ready
+        end
+
+        local function openEquipmentPerks()
+            ensureEquipmentLobby()
+
+            local equipTab =
+                getPath({"Interface", "Topbar", "Main", "Categories", "Equipment"})
+                or getPath({"Interface", "Topbar", "Main", "Equipment"})
+            fire(equipTab)
+            task.wait(0.3)
+
+            local perksCat = getPath({"Interface", "Equipment", "Categories", "Perks"})
+            if perksCat then
+                local target =
+                    perksCat:FindFirstChild("Interact", true)
+                    or perksCat:FindFirstChild("Main")
+                    or perksCat
+                fire(target)
+            end
+            task.wait(0.35)
+
+            fire(getPath({"Interface", "Equipment", "Perk", "Buttons", "Equip_Perk"}))
+            task.wait(0.15)
+        end
+
+        local function clickOrbitArea()
+            local vp = Cam.ViewportSize
+            local cx, cy = vp.X * 0.5, vp.Y * 0.52
+            local points = {}
+
+            for r = 70, 240, 15 do
+                for ang = -50, 50, 10 do
+                    local rad = math.rad(ang)
+                    table.insert(points, {
+                        cx + math.cos(rad) * r,
+                        cy + math.sin(rad) * r * 0.75
+                    })
+                end
+            end
+
+            for r = 90, 180, 30 do
+                for ang = 130, 230, 20 do
+                    local rad = math.rad(ang)
+                    table.insert(points, {
+                        cx + math.cos(rad) * r,
+                        cy + math.sin(rad) * r * 0.75
+                    })
+                end
+            end
+
+            for i, p in ipairs(points) do
+                clickXY(p[1], p[2])
+                task.wait(0.02)
+                local cur, max, raw = readLive()
+                if cur and max then
+                    return cur, max, raw, i
+                end
+            end
+            return nil, nil, nil, nil
+        end
+
+        local function closePerkPanel()
+            local closeBtn = getPath({"Interface", "Equipment", "Perk", "Perk_Close"})
+            if closeBtn then
+                fire(closeBtn)
+            end
+        end
+
+        local function hideMenu()
+            pcall(function()
+                if getgenv().isUIHidden and getgenv().hideUI then
+                    if not getgenv().isUIHidden() then
+                        getgenv().hideUI()
+                    end
+                elseif Library and Library.Toggle and Window and Window.Holder and Window.Holder.Visible then
+                    Library:Toggle()
+                end
+            end)
+        end
+
+        local function restoreMenu()
+            pcall(function()
+                if getgenv().showUI then
+                    getgenv().showUI()
+                elseif Library and Library.Toggle and Window and Window.Holder and not Window.Holder.Visible then
+                    Library:Toggle()
+                end
+            end)
+        end
+
+        local function CheckPerks(keepOpen)
+            -- UI-only count (no S_Equipment Talents here)
+            print("[Perks] UI check start...")
+
+            hideMenu()
+            task.wait(1)
+
+            openEquipmentPerks()
+
+            local cur, max, raw = readLive()
+            print("[Perks] After open:", raw)
+
+            if not (cur and max) then
+                print("[Perks] Clicking orbit slots...")
+                local hitIndex
+                cur, max, raw, hitIndex = clickOrbitArea()
+                if hitIndex then
+                    print("[Perks] Hit at point #", hitIndex)
+                end
+            end
+
+            if not keepOpen then
+                closePerkPanel()
+            end
+
+            if cur and max then
+                getgenv().LastPerkCount = cur
+                getgenv().LastPerkMax = max
+            end
+
+            restoreMenu()
+
+            if cur and max then
+                Library:Notify(string.format("Perks: %d / %d", cur, max), 4)
+                print(string.format("[Perks] UI SUCCESS => %d / %d", cur, max))
+            else
+                Library:Notify("Failed to read perk count (UI)", 3)
+                print("[Perks] UI FAILED")
+            end
+
+            return cur, max
+        end
+
+        -- UI check → then delete selected rarities
+        local autoCheckDelete = false
+        local autoCheckDeleteBusy = false
+
+        local function CheckThenDeleteSelected(silent)
+            if autoCheckDeleteBusy then return end
+            autoCheckDeleteBusy = true
+
+            print("[Perks] Auto: UI check + delete selected...")
+            local ok, err = pcall(function()
+                CheckPerks(false)
+                task.wait(0.35)
+
+                local runner = getgenv().TownShip_RunDeletePerks
+                if type(runner) ~= "function" then
+                    if not silent then
+                        Library:Notify("Delete pipeline not ready", 3)
+                    end
+                    warn("[Perks] TownShip_RunDeletePerks missing")
+                    return
+                end
+
+                pcall(function()
+                    local tr = getgenv().TownShip_TargetRarities
+                    if type(tr) == "table" and Options then
+                        if Options.PerkDel_Common then tr.Common = Options.PerkDel_Common.Value end
+                        if Options.PerkDel_Rare then tr.Rare = Options.PerkDel_Rare.Value end
+                        if Options.PerkDel_Epic then tr.Epic = Options.PerkDel_Epic.Value end
+                        if Options.PerkDel_Legendary then tr.Legendary = Options.PerkDel_Legendary.Value end
+                        if Options.PerkDel_Secret then tr.Secret = Options.PerkDel_Secret.Value end
+                    end
+                end)
+
+                runner(silent == true)
+            end)
+            if not ok then
+                warn("[Perks] CheckThenDelete error:", err)
+            end
+
+            autoCheckDeleteBusy = false
+        end
+
+        -- API
+        getgenv().CheckPerks = CheckPerks
+        getgenv().CheckThenDeleteSelected = CheckThenDeleteSelected
+        getgenv().GetPerkCount = function()
+            local c = CheckPerks(false)
+            return c
+        end
+        getgenv().GetPerkMax = function()
+            CheckPerks(false)
+            return getgenv().LastPerkMax
+        end
+        getgenv().IsPerksMaxed = function()
+            local c, m = CheckPerks(false)
+            if c and m then
+                return c >= m
+            end
+            return false
+        end
+
+        PerkCountGroup:AddButton("Check Perk Count", function()
+            task.spawn(function()
+                CheckPerks(false)
+            end)
+        end)
+
+        -- Toggle: run Check+Delete ONCE per lobby visit (not looping)
+        local ranThisLobby = false
+        local wasInLobby = false
+
+        PerkCountGroup:AddToggle("AutoCheckDelete", {
+            Text = "Auto Check + Delete Selected",
+            Default = false,
+            Callback = function(v)
+                autoCheckDelete = v
+                if v then
+                    ranThisLobby = false
+                    wasInLobby = false
+                    Library:Notify("Auto Check+Delete ON (once per lobby)", 3)
+                    task.spawn(function()
+                        while autoCheckDelete do
+                            local inLobby = false
+                            pcall(function()
+                                inLobby = IsLobbyLobby and IsLobbyLobby() or false
+                            end)
+
+                            if inLobby then
+                                -- first time we detect lobby this visit → run once
+                                if not wasInLobby then
+                                    ranThisLobby = false
+                                end
+                                wasInLobby = true
+
+                                if not ranThisLobby and not autoCheckDeleteBusy then
+                                    ranThisLobby = true
+                                    print("[Perks] Once-per-lobby run starting...")
+                                    CheckThenDeleteSelected(true)
+                                    print("[Perks] Once-per-lobby run finished (will not repeat until you leave & re-enter lobby)")
+                                end
+                            else
+                                -- left lobby → allow one run next time we enter
+                                if wasInLobby then
+                                    print("[Perks] Left lobby — next enter will run once")
+                                end
+                                wasInLobby = false
+                                ranThisLobby = false
+                            end
+
+                            task.wait(1.5)
+                        end
+                    end)
+                else
+                    Library:Notify("Auto Check+Delete OFF", 2)
+                end
+            end
+        })
+
+        PerkCountGroup:AddButton("Show Cache / IDs", function()
+            local c = getgenv().LastPerkCount
+            local m = getgenv().LastPerkMax
+            local ids = getgenv().CachedPerkIds or getgenv().LastDeletePerkIds
+            local list = getgenv().LastPerkList or getgenv().CachedPerkList
+
+            if c and m then
+                Library:Notify(string.format("UI Count: %d / %d", c, m), 3)
+            end
+
+            if type(list) == "table" and #list > 0 then
+                print(string.format("[Perks] Cache list = %d entries", #list))
+                for i, e in ipairs(list) do
+                    print(string.format("[%03d] %s | %s | %s", i, tostring(e.id), tostring(e.name), tostring(e.rarity)))
+                end
+                Library:Notify(string.format("Printed %d perks to console", #list), 4)
+            elseif type(ids) == "table" and #ids > 0 then
+                print(string.format("[Perks] Cache IDs = %d", #ids))
+                for i, id in ipairs(ids) do
+                    print(string.format("[%03d] %s", i, tostring(id)))
+                end
+                Library:Notify(string.format("Printed %d IDs to console", #ids), 4)
+            else
+                Library:Notify("No perk list in memory yet", 3)
+            end
+        end)
+
+        PerkCountGroup:AddLabel("Toggle: UI check → delete selected rarities")
+        print("[Perks] Auto Check+Delete toggle ready")
     end)
 end
 
@@ -2403,7 +3127,7 @@ if IsLobbyLobby() then
                             sendTrade(n)
                             task.wait(0.12)
                         end
-                        task.wait(0.3)
+                        task.wait(0.15)
                     end
                 end)
             end
@@ -3026,7 +3750,7 @@ if IsLobbyLobby() then
             local addTitle = getAddButtonTitle()
             if addTitle == "+" then
                 click(addBtn)
-                task.wait(0.3)
+                task.wait(0.15)
                 return false
             elseif addTitle ~= "-" then
                 return false
@@ -3612,7 +4336,7 @@ if IsMainmenuLobby() then
             if not x then return end
             task.spawn(function()
                 while s do
-                    task.wait(0.3)
+                    task.wait(0.15)
                     local Slots = GetSlots()
                     if IsLogoActuallyVisible(GetLogo()) then continue end
                     if not IsVisible(Slots) then continue end
@@ -3686,7 +4410,7 @@ if IsMainmenuLobby() then
 
     task.spawn(function()
         while true do
-            task.wait(0.3)
+            task.wait(0.15)
             pcall(function()
                 if IsJoinCommunityDialogVisible() then
                     if autoJoinEnabled then
@@ -3744,7 +4468,7 @@ if IsMainmenuLobby() then
             R = true
             task.spawn(function()
                 while E do
-                    task.wait(0.3)
+                    task.wait(0.15)
                     
                     if not IsFollowFrameOpen() then
                         continue
@@ -4235,7 +4959,6 @@ local function findMissionRemote()
 end
 
 local MissionGET = findMissionRemote()
-
 if not MissionGET then
     local waited = 0
     while not MissionGET and waited < 5 do
@@ -4255,9 +4978,9 @@ local function SafeMissionCall(...)
 end
 
 if Tabs.Lobby then
-
     local Players = game:GetService("Players")
     local player = Players.LocalPlayer
+    local Player = player
 
     local function IsActuallyVisible(gui)
         if not gui or not gui:IsA("GuiObject") then return false end
@@ -4272,9 +4995,7 @@ if Tabs.Lobby then
     end
 
     local function isUIActive()
-        -- Prefer global lobby-ready flag
         if _G.LobbyUILoaded then
-            -- still verify something from Gear_Up exists
             local ok = false
             pcall(function()
                 local gear = player.PlayerGui.Interface.Gear_Up
@@ -4282,12 +5003,10 @@ if Tabs.Lobby then
             end)
             if ok then return true end
         end
-
         local interface = player.PlayerGui:FindFirstChild("Interface")
         if not interface then return false end
         local gearUp = interface:FindFirstChild("Gear_Up")
         if not gearUp then return false end
-
         local lobby = gearUp:FindFirstChild("Lobby")
         if lobby then
             local key = lobby:FindFirstChild("Key")
@@ -4296,10 +5015,8 @@ if Tabs.Lobby then
             if backing and IsActuallyVisible(backing) then return true end
             if IsActuallyVisible(lobby) then return true end
         end
-
         local hud = gearUp:FindFirstChild("HUD")
         if hud and IsActuallyVisible(hud) then return true end
-
         local invGui = interface:FindFirstChild("Topbar")
         if invGui then
             invGui = invGui:FindFirstChild("Main")
@@ -4314,979 +5031,714 @@ if Tabs.Lobby then
         return false
     end
   
-    local AutoMissionTabbox = Tabs.Lobby:AddLeftTabbox("Auto Content")
+-- ============================================================
+-- Auto Content → Mission (with Boosted Map support)
+-- ============================================================
+local AutoMissionTabbox = Tabs.Lobby:AddLeftTabbox("Auto Content")
+local MissionTab = AutoMissionTabbox:AddTab("Mission")
+print("[Mission] SMART BUILD + Boosted Map LOADED")
 
-    local MissionTab = AutoMissionTabbox:AddTab("Mission")
+local MissionObjectives = {
+    ["Shiganshina"] = {"Skirmish","Breach","Random"},
+    ["Trost"]       = {"Skirmish","Protect","Random"},
+    ["Outskirts"]   = {"Skirmish","Escort","Random"},
+    ["Forest"]      = {"Skirmish","Guard","Random"},
+    ["Utgard"]      = {"Skirmish","Defend","Random"},
+    ["Chapel"]      = {"Skirmish"},
+    ["Docks"]       = {"Skirmish","Stall","Random"},
+    ["Stohess"]     = {"Skirmish","Random"}
+}
 
-    local MissionObjectives = {
-        ["Shiganshina"] = {"Skirmish","Breach","Random"},
-        ["Trost"] = {"Skirmish","Protect","Random"},
-        ["Outskirts"] = {"Skirmish","Escort","Random"},
-        ["Forest"] = {"Skirmish","Guard","Random"},
-        ["Utgard"] = {"Skirmish","Defend","Random"},
-        ["Chapel"] = {"Skirmish"},
-        ["Docks"] = {"Skirmish","Stall","Random"},
-        ["Stohess"] = {"Skirmish","Random"}
-    }
+local ModifiersList = {
+    "No Perks", "No Skills", "No Memories", "Nightmare", "Oddball",
+    "Injury Prone", "Chronic Injuries", "Fog", "Glass Cannon", "Time Trial", "Boring", "Simple"
+}
 
-    local ModifiersList = {
-        "No Perks", "No Skills", "No Memories", "Nightmare", "Oddball",
-        "Injury Prone", "Chronic Injuries", "Fog", "Glass Cannon", "Time Trial", "Boring", "Simple"
-    }
+local State_Mission = {
+    Name = "Shiganshina",
+    Objective = "Skirmish",
+    Difficulty = "Hardest"
+}
 
-    local MODIFIER_ORDER = {
-        "No Perks", "No Skills", "No Memories", "Nightmare", "Oddball",
-        "Injury Prone", "Chronic Injuries", "Fog", "Glass Cannon", "Time Trial", "Boring", "Simple"
-    }
+local MissionDelay = 0
+local missionRunning = false
+local missionBusy = false
+local missionSessionId = 0
+local missionPendingStart = false
+local missionStartTask = nil
+local missionSelectionVersion = 0
+local useBoostedMap = false          -- ← الحالة الجديدة
 
-    local State_Mission = {
-        Name = "Shiganshina",
-        Objective = "Skirmish",
-        Difficulty = "Hardest"
-    }
+-- ===== Boosted Map Helper (robust) =====
+local function GetBoostedMap()
+    local found = {}
 
-    local MissionDelay = 0
-    local missionRunning = false
-    local missionBusy = false
-    local missionSessionId = 0
-    local lastNotifiedMissionMods = ""
+    local function tryAttr(obj, label)
+        if not obj then return end
+        local ok, v = pcall(function()
+            return obj:GetAttribute("Boosted_Map")
+        end)
+        if ok and type(v) == "string" and v ~= "" then
+            table.insert(found, {source = label, value = v})
+        end
+    end
+
+    tryAttr(workspace, "workspace")
+    tryAttr(game:GetService("Workspace"), "WorkspaceService")
+    tryAttr(game:GetService("ReplicatedStorage"), "ReplicatedStorage")
 
     pcall(function()
-        if Options and Options.MissionDropdown and Options.MissionDropdown.Value then State_Mission.Name = Options.MissionDropdown.Value end
-        if Options and Options.ObjectiveDropdown and Options.ObjectiveDropdown.Value then State_Mission.Objective = Options.ObjectiveDropdown.Value end
-        if Options and Options.MissionDifficultyDropdown and Options.MissionDifficultyDropdown.Value then State_Mission.Difficulty = Options.MissionDifficultyDropdown.Value end
-        if Options and Options.MissionDelaySlider and Options.MissionDelaySlider.Value then MissionDelay = tonumber(Options.MissionDelaySlider.Value) or 0 end
+        local missions = game:GetService("ReplicatedStorage"):FindFirstChild("Missions")
+        if missions then tryAttr(missions, "ReplicatedStorage.Missions") end
     end)
 
-    local function GetPlayerLevel()
-        local success, level = pcall(function()
-            local player = game:GetService("Players").LocalPlayer
-            local playerGui = player:FindFirstChild("PlayerGui")
-            if not playerGui then return 1 end
-            local interface = playerGui:FindFirstChild("Interface")
-            if not interface then return 1 end
-            local gearUp = interface:FindFirstChild("Gear_Up")
-            if not gearUp then return 1 end
-            local hud = gearUp:FindFirstChild("HUD")
-            if not hud then return 1 end
-            local levelFrame = hud:FindFirstChild("Level")
-            if not levelFrame then return 1 end
-            local title = levelFrame:FindFirstChild("Title")
-            if not title then return 1 end
-            local txt = tostring(title.Text)
-            local num = tonumber(txt:match("%d+"))
-            return num or 1
-        end)
-        return success and level or 1
-    end
-
-    local function GetDifficultyCycle(missionType)
-        local level = GetPlayerLevel()
-        if missionType == "Raids" then
-            if level >= 100 then return {"Aberrant"}
-            elseif level >= 60 then return {"Aberrant", "Severe", "Hard"}
-            elseif level >= 40 then return {"Severe", "Hard", "Normal"}
-            else return {"Hard", "Normal", "Easy"} end
-        end
-        if level >= 100 then return {"Aberrant"}
-        elseif level >= 60 then return {"Aberrant", "Severe", "Hard", "Normal", "Easy"}
-        elseif level >= 40 then return {"Severe", "Hard", "Normal", "Easy"}
-        else return {"Hard", "Normal", "Easy"} end
-    end
-
-    local function formatMissionModifiers(modList)
-        if not modList or #modList == 0 then return nil end
-        local sorted = {}
-        for _, ordered in ipairs(MODIFIER_ORDER) do
-            for _, m in ipairs(modList) do
-                if m == ordered then table.insert(sorted, m); break end
+    -- limited scan for attribute (first match only)
+    pcall(function()
+        for _, obj in ipairs(game:GetDescendants()) do
+            local ok, v = pcall(function()
+                return obj:GetAttribute("Boosted_Map")
+            end)
+            if ok and type(v) == "string" and v ~= "" then
+                table.insert(found, {source = obj:GetFullName(), value = v})
+                break
             end
         end
-        for _, m in ipairs(modList) do
-            local found = false
-            for _, ordered in ipairs(MODIFIER_ORDER) do
-                if m == ordered then found = true; break end
-            end
-            if not found then table.insert(sorted, m) end
+    end)
+
+    if #found == 0 then
+        print("[BoostedMap] not found")
+        return nil
+    end
+
+    for _, e in ipairs(found) do
+        print("[BoostedMap]", e.value, "from", e.source)
+    end
+
+    -- prefer a known mission map name
+    for _, e in ipairs(found) do
+        if MissionObjectives[e.value] then
+            return e.value
         end
-        return "Modifiers:\n" .. table.concat(sorted, "\n")
     end
+    return found[1].value
+end
 
-     local function CreateMissionWithRetry(missionName, objective, difficulty)
-        local maxRetries = 3
-        for attempt = 1, maxRetries do
-            if not missionRunning then return false end
-            local success, _ = SafeMissionCall("S_Missions", "Create", {
-                Difficulty = difficulty,
-                Type = "Missions",
-                Name = missionName,
-                Objective = objective
-            })
-            if success then
-                task.wait(0.15)
-                return true
-            end
-            if attempt < maxRetries then
-                Library:Notify(string.format("Mission creation failed, retry %d/%d in 3s", attempt, maxRetries), 2)
-                task.wait(3)
-            else
-                Library:Notify("Mission creation failed after 3 attempts, stopping", 3)
-                return false
+pcall(function()
+    if Options and Options.MissionDropdown and Options.MissionDropdown.Value then
+        State_Mission.Name = Options.MissionDropdown.Value
+    end
+    if Options and Options.MissionObjectiveDropdown and Options.MissionObjectiveDropdown.Value then
+        State_Mission.Objective = Options.MissionObjectiveDropdown.Value
+    end
+    if Options and Options.MissionDifficultyDropdown and Options.MissionDifficultyDropdown.Value then
+        State_Mission.Difficulty = Options.MissionDifficultyDropdown.Value
+    end
+    if Options and Options.MissionDelaySlider and Options.MissionDelaySlider.Value then
+        MissionDelay = tonumber(Options.MissionDelaySlider.Value) or 0
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+-- Helpers
+-- ═══════════════════════════════════════════════════════════
+
+local function GetPlayerLevel()
+    local success, level = pcall(function()
+        local playerGui = player:FindFirstChild("PlayerGui")
+        if not playerGui then return 1 end
+        local interface = playerGui:FindFirstChild("Interface")
+        if not interface then return 1 end
+        local gearUp = interface:FindFirstChild("Gear_Up")
+        if not gearUp then return 1 end
+        local hud = gearUp:FindFirstChild("HUD")
+        if not hud then return 1 end
+        local levelFrame = hud:FindFirstChild("Level")
+        if not levelFrame then return 1 end
+        local title = levelFrame:FindFirstChild("Title")
+        if not title then return 1 end
+        return tonumber(tostring(title.Text):match("%d+")) or 1
+    end)
+    return success and level or 1
+end
+
+local function GetMyMission(timeout)
+    timeout = timeout or 1.5
+    local start = tick()
+    while tick() - start < timeout do
+        local missions = game:GetService("ReplicatedStorage"):FindFirstChild("Missions")
+        if missions then
+            for _, mission in ipairs(missions:GetChildren()) do
+                local leader = mission:FindFirstChild("Leader")
+                if leader and leader.Value == player.Name then
+                    return mission
+                end
             end
         end
-        return false
+        task.wait(0.08)
     end
+    return nil
+end
 
-    local function CreateMission(missionName, objective, difficulty)
-        return CreateMissionWithRetry(missionName, objective, difficulty)
+local function LeaveMission(waitForGone)
+    SafeMissionCall("S_Missions", "Leave")
+    if waitForGone == false then return end
+    local start = tick()
+    while tick() - start < 1.5 do
+        if not GetMyMission(0.1) then break end
+        task.wait(0.08)
     end
+    task.wait(0.15)
+end
 
-    local function ClearMissionModifiers()
-        if not missionRunning then return end
-        for retry = 1, 2 do
-            if not missionRunning then break end
-            local success = SafeMissionCall("S_Missions", "ClearModifiers")
-            if success then break end
+local function CreateMission(missionName, objective, difficulty)
+    for attempt = 1, 3 do
+        if not missionRunning then return false end
+
+        local success, result = SafeMissionCall("S_Missions", "Create", {
+            Difficulty = difficulty,
+            Type = "Missions",
+            Name = missionName,
+            Objective = objective
+        })
+
+        task.wait(0.12)
+        local mission = GetMyMission(0.7)
+        if mission then
+            return true, mission
+        end
+
+        if attempt < 3 then
+            LeaveMission(true)
             task.wait(0.2)
         end
-        task.wait(0.3)
+    end
+    return false
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- Modifiers
+-- ═══════════════════════════════════════════════════════════
+
+local function ClearMissionModifiers()
+    if not missionRunning then return end
+    for _ = 1, 3 do
+        if not missionRunning then break end
+        SafeMissionCall("S_Missions", "ClearModifiers")
+        task.wait(0.18)
+    end
+    task.wait(0.35)
+end
+
+local function ApplyModifier(mod)
+    local names = {mod}
+    local noSpace = mod:gsub("%s+", "")
+    if noSpace ~= mod then
+        table.insert(names, noSpace)
     end
 
-    local function ApplyModifier(mod)
-        local Event = game:GetService("ReplicatedStorage").Assets.Remotes.GET
-        -- ONLY count explicit true — nil/false means not applied
-        local names = { mod }
-        local noSpace = mod:gsub("%s+", "")
-        if noSpace ~= mod then
-            table.insert(names, noSpace)
-        end
-        for _, name in ipairs(names) do
-            for attempt = 1, 3 do
-                local success, result = pcall(function()
-                    return Event:InvokeServer("S_Missions", "Modify", name)
-                end)
-                if success and (result == true or result == "true" or result == 1) then
+    for _, name in ipairs(names) do
+        for attempt = 1, 4 do
+            if not missionRunning then return false end
+
+            local success, result = SafeMissionCall("S_Missions", "Modify", name)
+
+            if success then
+                if result == true or result == "true" or result == 1 then
                     return true
                 end
                 if type(result) == "table" and (result.Success == true or result.success == true) then
                     return true
                 end
-                task.wait(0.2)
             end
-        end
-        return false
-    end
 
-    local function ApplyMissionModifiers()
-        if not missionRunning then return end
-        local selected = {}
-        pcall(function()
-            if Options and Options.MissionModifiersDropdown and Options.MissionModifiersDropdown.Value then
-                local val = Options.MissionModifiersDropdown.Value
-                if type(val) == "table" then
-                    for mod, enabled in pairs(val) do
-                        if enabled then table.insert(selected, mod) end
-                    end
-                end
-            end
-        end)
-        if #selected == 0 then return end
-
-        ClearMissionModifiers()
-        if not missionRunning then return end
-
-        for _, mod in ipairs(selected) do
-            if not missionRunning then break end
-            local success = false
-            for retry = 1, 3 do
-                if not missionRunning then break end
-                success = ApplyModifier(mod)
-                if success then break end
-                task.wait(0.3)
-            end
-            task.wait(0.5)
-        end
-        task.wait(0.4)
-    end
-
-    -- OLD WORKING START (simple)
-    local function StartMission()
-        if not missionRunning then return end
-        task.wait(0.25)
-        SafeMissionCall("S_Missions", "Start")
-    end
-
-    local function LeaveMission()
-        SafeMissionCall("S_Missions", "Leave")
-    end
-
-    local function GetMyMission()
-        local start = tick()
-        while (tick() - start) < 2 do
-            local missions = game:GetService("ReplicatedStorage"):FindFirstChild("Missions")
-            if missions then
-                for _, mission in next, missions:GetChildren() do
-                    if mission:FindFirstChild("Leader") and mission.Leader.Value == game.Players.LocalPlayer.Name then
-                        return mission
-                    end
-                end
-            end
-            task.wait(0.1)
-        end
-        return nil
-    end
-
-    local function WaitForLobbyUI(timeout)
-        timeout = timeout or 40
-        if _G.LobbyUILoaded then return true end
-        local t0 = tick()
-        while not _G.LobbyUILoaded do
-            if (tick() - t0) >= timeout then return false end
-            task.wait(0.2)
-        end
-        return true
-    end
-
-    local function MissionLoop(mySession)
-        -- wait lobby UI once at start (already loaded usually)
-        WaitForLobbyUI(15)
-        task.wait(0.3)
-        if MissionDelay > 0 then task.wait(MissionDelay) end
-
-        while missionRunning and missionSessionId == mySession do
-            if missionBusy then task.wait(0.05); continue end
-            missionBusy = true
-
-            local currentMission = State_Mission.Name
-            local currentObjective = State_Mission.Objective
-            local currentDifficulty = State_Mission.Difficulty
-
-            if currentDifficulty == "Hardest" then
-                local cycle = GetDifficultyCycle("Missions")
-                local created = false
-                local targetDiff = nil
-                local targetObj = nil
-
-                for _, diff in ipairs(cycle) do
-                    if not missionRunning or missionSessionId ~= mySession then break end
-                    if State_Mission.Difficulty ~= "Hardest" then break end
-
-                    local objList = MissionObjectives[currentMission] or {"Skirmish"}
-                    local obj = currentObjective
-                    if obj == "Random" then
-                        local filtered = {}
-                        for _, v in ipairs(objList) do if v ~= "Random" then filtered[#filtered+1] = v end end
-                        obj = filtered[math.random(#filtered)]
-                    end
-
-                    CreateMission(currentMission, obj, diff)
-                    task.wait(0.2)
-
-                    if GetMyMission() then
-                        Library:Notify(string.format("Found suitable difficulty: %s", diff), 3)
-                        targetDiff = diff
-                        targetObj = obj
-                        created = true
-                        break
-                    else
-                        LeaveMission()
-                        task.wait(0.5)
-                    end
-
-                    if not missionRunning then break end
-                end
-
-                if not created then
-                    Library:Notify("Mission creation failed, retrying later", 3)
-                    missionBusy = false
-                    task.wait(2)
-                    continue
-                end
-
-                Library:Notify("Leaving mission to reset state...", 3)
-                LeaveMission()
-                local leaveStart = tick()
-                while (tick() - leaveStart) < 2 do
-                    local missions = game:GetService("ReplicatedStorage"):FindFirstChild("Missions")
-                    local stillExists = false
-                    if missions then
-                        for _, m in next, missions:GetChildren() do
-                            if m:FindFirstChild("Leader") and m.Leader.Value == game.Players.LocalPlayer.Name then
-                                stillExists = true
-                                break
-                            end
-                        end
-                    end
-                    if not stillExists then break end
-                    task.wait(0.1)
-                end
-                task.wait(0.3)
-
-                Library:Notify(string.format("Recreating mission: %s", targetDiff), 3)
-                CreateMission(currentMission, targetObj, targetDiff)
-                task.wait(0.2)
-
-                local recreateSuccess = false
-                for retry = 1, 3 do
-                    if GetMyMission() then
-                        recreateSuccess = true
-                        break
-                    end
-                    task.wait(0.3)
-                end
-                if not recreateSuccess then
-                    Library:Notify("Failed to recreate mission, restarting loop", 3)
-                    LeaveMission()
-                    missionBusy = false
-                    task.wait(1)
-                    continue
-                end
-                Library:Notify("Mission ready", 3)
-
-                Library:Notify("Applying modifiers...", 3)
-                local selectedMods = {}
-                pcall(function()
-                    if Options and Options.MissionModifiersDropdown and Options.MissionModifiersDropdown.Value then
-                        local val = Options.MissionModifiersDropdown.Value
-                        if type(val) == "table" then
-                            for mod, enabled in pairs(val) do
-                                if enabled then table.insert(selectedMods, mod) end
-                            end
-                        end
-                    end
-                end)
-
-                if #selectedMods > 0 then
-                    for retry = 1, 2 do
-                        if not missionRunning then break end
-                        SafeMissionCall("S_Missions", "ClearModifiers")
-                        task.wait(0.2)
-                    end
-                    task.wait(0.3)
-
-                    local applied = 0
-                    local failed = {}
-                    for _, mod in ipairs(selectedMods) do
-                        if not missionRunning then break end
-                        local success = ApplyModifier(mod)
-                        if success then
-                            applied = applied + 1
-                        else
-                            table.insert(failed, mod)
-                        end
-                        task.wait(0.3)
-                    end
-                    -- retry failed modifiers
-                    if #failed > 0 and missionRunning then
-                        Library:Notify(string.format("Retrying %d failed modifiers...", #failed), 2)
-                        task.wait(0.5)
-                        local stillFailed = {}
-                        for _, mod in ipairs(failed) do
-                            if not missionRunning then break end
-                            local success = false
-                            for retry = 1, 3 do
-                                success = ApplyModifier(mod)
-                                if success then break end
-                                task.wait(0.25)
-                            end
-                            if success then
-                                applied = applied + 1
-                            else
-                                table.insert(stillFailed, mod)
-                            end
-                            task.wait(0.3)
-                        end
-                        failed = stillFailed
-                    end
-                    task.wait(0.4)
-                    if #failed == 0 then
-                        Library:Notify(string.format("Applied %d/%d modifiers", applied, #selectedMods), 3)
-                    else
-                        Library:Notify(string.format("Applied %d/%d (failed: %s)", applied, #selectedMods, table.concat(failed, ", ")), 4)
-                    end
-                else
-                    Library:Notify("No modifiers selected", 2)
-                end
-
-                if not missionRunning then
-                    missionBusy = false
-                    continue
-                end
-
-                task.wait(1) -- wait after modifiers before start
-                Library:Notify("Starting mission", 2)
-                StartMission()
-                local startTick = tick()
-                repeat task.wait(0.05) until not missionRunning or missionSessionId ~= mySession or tick() - startTick >= 3.5
-                if MissionDelay > 0 then task.wait(MissionDelay) end
-
-            else
-                local objList = MissionObjectives[currentMission] or {"Skirmish"}
-                local obj = currentObjective
-                if obj == "Random" then
-                    local filtered = {}
-                    for _, v in ipairs(objList) do if v ~= "Random" then filtered[#filtered+1] = v end end
-                    obj = filtered[math.random(#filtered)]
-                end
-
-                CreateMission(currentMission, obj, currentDifficulty)
-                task.wait(0.2)
-
-                if not GetMyMission() then
-                    Library:Notify("Mission creation failed, resetting...", 2)
-                    LeaveMission()
-                    missionBusy = false
-                    task.wait(0.5)
-                    continue
-                end
-
-                Library:Notify("Recreating mission...", 3)
-                LeaveMission()
-                task.wait(0.3)
-                CreateMission(currentMission, obj, currentDifficulty)
-                task.wait(0.2)
-
-                local recreateSuccess = false
-                for retry = 1, 3 do
-                    if GetMyMission() then
-                        recreateSuccess = true
-                        break
-                    end
-                    task.wait(0.3)
-                end
-                if not recreateSuccess then
-                    Library:Notify("Recreate failed, restarting loop", 3)
-                    LeaveMission()
-                    missionBusy = false
-                    task.wait(1)
-                    continue
-                end
-                Library:Notify("Mission ready", 3)
-
-                local selectedMods = {}
-                pcall(function()
-                    if Options and Options.MissionModifiersDropdown and Options.MissionModifiersDropdown.Value then
-                        local val = Options.MissionModifiersDropdown.Value
-                        if type(val) == "table" then
-                            for mod, enabled in pairs(val) do
-                                if enabled then table.insert(selectedMods, mod) end
-                            end
-                        end
-                    end
-                end)
-
-                if #selectedMods > 0 then
-                    for retry = 1, 2 do
-                        if not missionRunning then break end
-                        SafeMissionCall("S_Missions", "ClearModifiers")
-                        task.wait(0.2)
-                    end
-                    task.wait(0.3)
-                    local applied = 0
-                    local failed = {}
-                    for _, mod in ipairs(selectedMods) do
-                        if not missionRunning then break end
-                        local success = ApplyModifier(mod)
-                        if success then
-                            applied = applied + 1
-                        else
-                            table.insert(failed, mod)
-                        end
-                        task.wait(0.3)
-                    end
-                    -- retry failed modifiers
-                    if #failed > 0 and missionRunning then
-                        Library:Notify(string.format("Retrying %d failed modifiers...", #failed), 2)
-                        task.wait(0.5)
-                        local stillFailed = {}
-                        for _, mod in ipairs(failed) do
-                            if not missionRunning then break end
-                            local success = false
-                            for retry = 1, 3 do
-                                success = ApplyModifier(mod)
-                                if success then break end
-                                task.wait(0.25)
-                            end
-                            if success then
-                                applied = applied + 1
-                            else
-                                table.insert(stillFailed, mod)
-                            end
-                            task.wait(0.3)
-                        end
-                        failed = stillFailed
-                    end
-                    task.wait(0.4)
-                    if #failed == 0 then
-                        Library:Notify(string.format("Applied %d/%d modifiers", applied, #selectedMods), 3)
-                    else
-                        Library:Notify(string.format("Applied %d/%d (failed: %s)", applied, #selectedMods, table.concat(failed, ", ")), 4)
-                    end
-                end
-
-                if not missionRunning then
-                    missionBusy = false
-                    continue
-                end
-
-                task.wait(1) -- wait after modifiers before start
-                Library:Notify("Starting mission", 2)
-                StartMission()
-                local startTick = tick()
-                repeat task.wait(0.05) until not missionRunning or missionSessionId ~= mySession or tick() - startTick >= 3.5
-            end
-            missionBusy = false
+            task.wait(0.18 + (attempt * 0.05))
         end
     end
+    return false
+end
 
-    MissionTab:AddDropdown("MissionDropdown", {
-        Values = {"Shiganshina","Trost","Outskirts","Forest","Utgard","Docks","Stohess","Chapel"},
-        Default = State_Mission.Name,
-        Text = "Mission",
-        Callback = function(val)
-            State_Mission.Name = val
-            local newObjs = MissionObjectives[val] or {"Skirmish"}
-            State_Mission.Objective = newObjs[1]
-            if Options and Options.MissionObjectiveDropdown then
-                Options.MissionObjectiveDropdown:SetValues(newObjs)
-                Options.MissionObjectiveDropdown:SetValue(newObjs[1])
-            end
-        end
-    })
+local function ApplyMissionModifiers()
+    if not missionRunning then return end
 
-    MissionTab:AddDropdown("MissionObjectiveDropdown", {
-        Values = MissionObjectives["Shiganshina"],
-        Default = State_Mission.Objective,
-        Text = "Objective",
-        Callback = function(val) State_Mission.Objective = val end
-    })
-
-    MissionTab:AddDropdown("MissionDifficultyDropdown", {
-        Values = {"Easy","Normal","Hard","Severe","Aberrant","Hardest"},
-        Default = State_Mission.Difficulty,
-        Text = "Mode",
-        Callback = function(val) State_Mission.Difficulty = val end
-    })
-
-    MissionTab:AddDropdown("MissionModifiersDropdown", {
-        Values = ModifiersList,
-        Default = {},
-        Multi = true,
-        Text = "Modifiers",
-        Callback = function() end
-    })
-
-    MissionTab:AddSlider("MissionDelaySlider", {
-        Text = "Delay",
-        Default = MissionDelay,
-        Min = 0, Max = 60, Rounding = 0,
-        Callback = function(v) MissionDelay = v end
-    })
-
-        local activeAutoContent = nil  
-
-        local missionPendingStart = false
-    local missionStartTask = nil
-
-    local missionToggle = MissionTab:AddToggle("AutoStartMissionToggle", {
-        Text = "Start Mission",
-        Default = false,
-        Callback = function(v)
-            if v then
-                if missionRunning or missionPendingStart then return end
-                if activeAutoContent ~= nil then
-                    Library:Notify("Select one Toggle", 2)
-                    pcall(function()
-                        if Options and Options.AutoStartMissionToggle then
-                            Options.AutoStartMissionToggle:SetValue(false)
-                        end
-                    end)
-                    return
-                end
-                activeAutoContent = "mission"
-                missionPendingStart = true
-                missionStartTask = task.spawn(function()
-                    while missionPendingStart do
-                        if isUIActive() or _G.LobbyUILoaded then
-                            Library:Notify("Content Ready (Mission)", 2)
-                            break
-                        end
-                        task.wait(0.5)
-                    end
-                    if missionPendingStart then
-                        missionRunning = true
-                        missionBusy = false
-                        missionSessionId = missionSessionId + 1
-                        task.spawn(MissionLoop, missionSessionId)
-                    end
-                    missionPendingStart = false
-                end)
-            else
-                missionPendingStart = false
-                if missionStartTask then task.cancel(missionStartTask) end
-                missionRunning = false
-                missionSessionId = missionSessionId + 1
-                LeaveMission()
-                if activeAutoContent == "mission" then activeAutoContent = nil end
-            end
-        end
-    })
-
-        local RaidTab = AutoMissionTabbox:AddTab("Raid")
-
-    local RaidObjectives = {
-        ["Attack Titan"] = {name = "Trost", objective = "Attack Titan", hasMinimum = false},
-        ["Armored Titan"] = {name = "Shiganshina", objective = "Armored Titan", hasMinimum = false},
-        ["Female Titan"] = {name = "Stohess", objective = "Female Titan", hasMinimum = false},
-        ["Colossal Titan"] = {name = "Shiganshina", objective = "Colossal Titan", hasMinimum = true, minimum = 3}
-    }
-
-    local State_Raid = { Boss = "Attack Titan", Difficulty = "Hardest" }
-    local RaidDelay = 0
-    local raidRunning = false
-    local raidBusy = false
-    local raidSessionId = 0
-    local lastNotifiedRaidMods = ""
-
+    local selected = {}
     pcall(function()
-        if Options and Options.RaidBossDropdown and Options.RaidBossDropdown.Value then State_Raid.Boss = Options.RaidBossDropdown.Value end
-        if Options and Options.RaidDifficultyDropdown and Options.RaidDifficultyDropdown.Value then State_Raid.Difficulty = Options.RaidDifficultyDropdown.Value end
-        if Options and Options.RaidDelaySlider and Options.RaidDelaySlider.Value then RaidDelay = tonumber(Options.RaidDelaySlider.Value) or 0 end
+        if Options and Options.MissionModifiersDropdown and Options.MissionModifiersDropdown.Value then
+            local value = Options.MissionModifiersDropdown.Value
+            if type(value) == "table" then
+                for mod, enabled in pairs(value) do
+                    if enabled then
+                        table.insert(selected, mod)
+                    end
+                end
+            end
+        end
     end)
 
-        local function CreateRaidWithRetry(bossName, difficulty)
-        local maxRetries = 3
-        for attempt = 1, maxRetries do
-            if not raidRunning then return false end
-            local data = RaidObjectives[bossName]
-            if not data then return false end
-            local createArgs = {
-                Difficulty = difficulty,
-                Type = "Raids",
-                Name = data.name,
-                Objective = data.objective
-            }
-            if data.hasMinimum then createArgs.Minimum = data.minimum end
-            local success, _ = SafeMissionCall("S_Missions", "Create", createArgs)
+    if #selected == 0 then
+        Library:Notify("No modifiers selected", 2)
+        return
+    end
+
+    local ordered = {}
+    for _, mod in ipairs(ModifiersList) do
+        for _, sel in ipairs(selected) do
+            if sel == mod then
+                table.insert(ordered, mod)
+                break
+            end
+        end
+    end
+    for _, sel in ipairs(selected) do
+        local found = false
+        for _, o in ipairs(ordered) do
+            if o == sel then found = true break end
+        end
+        if not found then
+            table.insert(ordered, sel)
+        end
+    end
+
+    ClearMissionModifiers()
+    if not missionRunning then return end
+
+    local applied = 0
+    local failed = {}
+
+    for _, mod in ipairs(ordered) do
+        if not missionRunning then break end
+
+        local success = ApplyModifier(mod)
+        if success then
+            applied += 1
+            print("[Mission] ✓ Modifier applied:", mod)
+        else
+            table.insert(failed, mod)
+            warn("[Mission] ✗ Failed modifier:", mod)
+        end
+        task.wait(0.16)
+    end
+
+    if #failed > 0 and missionRunning then
+        task.wait(0.5)
+        Library:Notify("Retrying failed modifiers...", 2)
+
+        local stillFailed = {}
+        for _, mod in ipairs(failed) do
+            if not missionRunning then break end
+
+            local success = false
+            for _ = 1, 3 do
+                success = ApplyModifier(mod)
+                if success then break end
+                task.wait(0.22)
+            end
+
             if success then
-                task.wait(0.05)
-                return true
-            end
-            if attempt < maxRetries then
-                Library:Notify(string.format("Raid creation failed, retry %d/%d in 3s", attempt, maxRetries), 2)
-                task.wait(3)
+                applied += 1
+                print("[Mission] ✓ Retry success:", mod)
             else
-                Library:Notify("Raid creation failed after 3 attempts, stopping", 3)
-                return false
+                table.insert(stillFailed, mod)
             end
+            task.wait(0.18)
         end
-        return false
+        failed = stillFailed
     end
 
-        local function CreateRaid(bossName, difficulty)
-        return CreateRaidWithRetry(bossName, difficulty)
-    end
+    task.wait(0.4)
 
-    local function ClearRaidModifiers()
-        if not raidRunning then return end
-        for retry = 1, 2 do
-            if not raidRunning then break end
-            local success = SafeMissionCall("S_Missions", "ClearModifiers")
-            if success then break end
-            task.wait(0.2)
-        end
+    if #failed == 0 then
+        Library:Notify(string.format("Applied %d/%d modifiers", applied, #selected), 3)
+    else
+        Library:Notify(string.format("Applied %d/%d (failed: %s)", applied, #selected, table.concat(failed, ", ")), 4)
+    end
+end
+
+local function StartMission()
+    if not missionRunning then return false end
+
+    for attempt = 1, 4 do
+        if not missionRunning then return false end
+
+        local success = SafeMissionCall("S_Missions", "Start")
         task.wait(0.3)
+
+        if not GetMyMission(0.8) then
+            print("[Mission] Started successfully on attempt", attempt)
+            return true
+        end
+
+        if attempt < 4 then
+            warn("[Mission] Start attempt", attempt, "— mission still in lobby, retrying...")
+            task.wait(0.25)
+        end
+    end
+    return false
+end
+
+local function WaitForLobbyUI(timeout)
+    timeout = timeout or 15
+    if _G.LobbyUILoaded then return true end
+    local started = tick()
+    while not _G.LobbyUILoaded do
+        if tick() - started >= timeout then return false end
+        task.wait(0.2)
+    end
+    return true
+end
+
+-- ═══════════════════════════════════════════════════════════
+-- Main Cycle (with Boosted Map)
+-- ═══════════════════════════════════════════════════════════
+
+local function RunMissionCycle(mySession)
+    if not missionRunning or missionSessionId ~= mySession then return end
+
+    if _G.LobbyUILoaded ~= true then
+        pcall(function() WaitForLobbyUI(12) end)
     end
 
-    local function ApplyRaidModifiers()
-        if not raidRunning then return end
-        local selected = {}
-        pcall(function()
-            if Options and Options.RaidModifiersDropdown and Options.RaidModifiersDropdown.Value then
-                local val = Options.RaidModifiersDropdown.Value
-                if type(val) == "table" then
-                    for mod, enabled in pairs(val) do
-                        if enabled then table.insert(selected, mod) end
-                    end
-                end
+    if MissionDelay > 0 then
+        task.wait(MissionDelay)
+    end
+
+    if not missionRunning or missionSessionId ~= mySession then return end
+
+    local selectionVersion = missionSelectionVersion
+    local objective = (Options and Options.MissionObjectiveDropdown and Options.MissionObjectiveDropdown.Value) or State_Mission.Objective
+    local selectedDifficulty = (Options and Options.MissionDifficultyDropdown and Options.MissionDifficultyDropdown.Value) or State_Mission.Difficulty
+
+    -- ===== Boosted Map Logic (no wrong fallback) =====
+    local currentMission
+    if useBoostedMap then
+        local boosted = GetBoostedMap()
+        if boosted and MissionObjectives[boosted] then
+            currentMission = boosted
+            print("[Mission] FORCED Boosted Map →", currentMission)
+            Library:Notify("Boosted Map: " .. currentMission, 3)
+        else
+            -- IMPORTANT: do NOT fall back to dropdown (was causing Docks)
+            Library:Notify("No valid Boosted Map right now — skipping cycle", 4)
+            print("[Mission] Skip cycle: invalid/missing boosted map →", tostring(boosted))
+            return
+        end
+    else
+        currentMission = (Options and Options.MissionDropdown and Options.MissionDropdown.Value) or State_Mission.Name
+    end
+
+    if not MissionObjectives[currentMission] then
+        Library:Notify("Invalid map: " .. tostring(currentMission), 3)
+        print("[Mission] Invalid map, abort cycle:", tostring(currentMission))
+        return
+    end
+
+    local validObjectives = MissionObjectives[currentMission] or {"Skirmish"}
+    local objectiveIsValid = false
+    for _, allowed in ipairs(validObjectives) do
+        if allowed == objective then
+            objectiveIsValid = true
+            break
+        end
+    end
+    if not objectiveIsValid then
+        objective = validObjectives[1] or "Skirmish"
+    end
+
+    if objective == "Random" then
+        local filtered = {}
+        for _, v in ipairs(validObjectives) do
+            if v ~= "Random" then table.insert(filtered, v) end
+        end
+        objective = (#filtered > 0) and filtered[math.random(1, #filtered)] or "Skirmish"
+    end
+
+    local function SelectionStillCurrent()
+        -- لما Boosted Map شغال منتجاهل تغيير الـ Dropdown
+        if useBoostedMap then
+            return missionSelectionVersion == selectionVersion
+        end
+        local liveMission = (Options and Options.MissionDropdown and Options.MissionDropdown.Value) or State_Mission.Name
+        local liveObjective = (Options and Options.MissionObjectiveDropdown and Options.MissionObjectiveDropdown.Value) or State_Mission.Objective
+        local liveDifficulty = (Options and Options.MissionDifficultyDropdown and Options.MissionDifficultyDropdown.Value) or State_Mission.Difficulty
+        return missionSelectionVersion == selectionVersion
+            and liveMission == currentMission
+            and liveObjective == (Options and Options.MissionObjectiveDropdown and Options.MissionObjectiveDropdown.Value or objective)
+            and liveDifficulty == selectedDifficulty
+    end
+
+    print(string.format("[Mission] Cycle => Map=%s | Obj=%s | Diff=%s | Boosted=%s", 
+        currentMission, objective, selectedDifficulty, tostring(useBoostedMap)))
+
+    if GetMyMission(0.2) then
+        LeaveMission(true)
+    end
+
+    local targetDifficulty = selectedDifficulty
+    local created = false
+
+    if selectedDifficulty == "Hardest" then
+        local level = GetPlayerLevel()
+        local difficultyCycle
+        if level >= 100 then
+            difficultyCycle = {"Aberrant"}
+        elseif level >= 60 then
+            difficultyCycle = {"Aberrant", "Severe", "Hard", "Normal", "Easy"}
+        elseif level >= 40 then
+            difficultyCycle = {"Severe", "Hard", "Normal", "Easy"}
+        else
+            difficultyCycle = {"Hard", "Normal", "Easy"}
+        end
+
+        for _, diff in ipairs(difficultyCycle) do
+            if not missionRunning or missionSessionId ~= mySession then return end
+            if not SelectionStillCurrent() then return end
+
+            created = CreateMission(currentMission, objective, diff)
+            if created then
+                targetDifficulty = diff
+                Library:Notify("Found difficulty: " .. diff, 3)
+                break
             end
+            LeaveMission(true)
+            task.wait(0.15)
+        end
+    else
+        created = CreateMission(currentMission, objective, targetDifficulty)
+    end
+
+    if not created then
+        Library:Notify("Mission creation failed", 3)
+        LeaveMission(true)
+        return
+    end
+
+    if not missionRunning or missionSessionId ~= mySession or not SelectionStillCurrent() then
+        LeaveMission(true)
+        return
+    end
+
+    Library:Notify("Applying modifiers...", 2)
+    ApplyMissionModifiers()
+
+    if not missionRunning or missionSessionId ~= mySession or not SelectionStillCurrent() then
+        LeaveMission(true)
+        return
+    end
+
+    task.wait(0.3)
+
+    if not missionRunning or missionSessionId ~= mySession or not SelectionStillCurrent() then
+        LeaveMission(true)
+        return
+    end
+
+    Library:Notify("Starting: " .. currentMission .. " (" .. targetDifficulty .. ")", 2)
+    local started = StartMission()
+
+    if started then
+        Library:Notify("Mission started!", 3)
+    else
+        Library:Notify("Start failed after retries", 4)
+        LeaveMission(true)
+    end
+end
+
+local function MissionLoop(mySession)
+    while missionRunning and missionSessionId == mySession do
+        if missionBusy then
+            task.wait(0.05)
+            continue
+        end
+        missionBusy = true
+
+        local ok, err = pcall(function()
+            RunMissionCycle(mySession)
         end)
-        if #selected == 0 then return end
-        local modsString = table.concat(selected, ", ")
-        if lastNotifiedRaidMods ~= modsString then
-            lastNotifiedRaidMods = modsString
+
+        if not ok then
+            warn("[Mission] Error:", err)
+            Library:Notify("Mission error - retrying", 3)
+            pcall(function() LeaveMission(true) end)
         end
-        ClearRaidModifiers()
-        if not raidRunning then return end
-        task.wait(0.35)
-        ApplyModifiersWithRetry(selected, function() return raidRunning end)
-        task.wait(0.3)
+
+        missionBusy = false
+        task.wait(1.5) -- انتظار بسيط قبل الدورة الجاية
     end
+end
 
-    local function StartRaid()
-        if not raidRunning then return end
-        task.wait(0.1)
-        SafeMissionCall("S_Missions", "Start")
-    end
+-- ═══════════════════════════════════════════════════════════
+-- UI
+-- ═══════════════════════════════════════════════════════════
 
-    local function LeaveRaid()
-        SafeMissionCall("S_Missions", "Leave")
-    end
-
-        local function RaidLoop(mySession)
-        task.wait(1)
-        if RaidDelay > 0 then task.wait(RaidDelay) end
-        
-        while raidRunning and raidSessionId == mySession do
-            if raidBusy then task.wait(0.05); continue end
-            raidBusy = true
-            local currentBoss = State_Raid.Boss
-            local currentDifficulty = State_Raid.Difficulty
-
-            if currentDifficulty == "Hardest" then
-                local cycle = GetDifficultyCycle("Raids")
-                local created = false
-                local targetDiff = nil
-                
-                for _, diff in ipairs(cycle) do
-                    if not raidRunning or raidSessionId ~= mySession then break end
-                    if State_Raid.Difficulty ~= "Hardest" then break end
-                    
-                    CreateRaid(currentBoss, diff)
-                    task.wait(0.2)
-                    
-                    if GetMyMission() then
-                        Library:Notify(string.format("Found suitable raid difficulty: %s", diff), 3)
-                        targetDiff = diff
-                        created = true
-                        break
-                    else
-                        LeaveRaid()
-                        task.wait(0.5)
-                    end
-                    
-                    if not raidRunning then break end
-                end
-                
-                if not created then
-                    Library:Notify("Raid creation failed, retrying later", 3)
-                    raidBusy = false
-                    task.wait(2)
-                    continue
-                end
-                
-                
-                Library:Notify("Leaving current raid...", 3)
-                LeaveRaid()
-                task.wait(0.3)
-                
-               
-                Library:Notify(string.format("Recreating raid with difficulty: %s", targetDiff), 3)
-                CreateRaid(currentBoss, targetDiff)
-                task.wait(0.2)
-                local ok = false
-                for retry = 1, 3 do
-                    if GetMyMission() then ok = true; break end
-                    task.wait(0.3)
-                end
-                if not ok then
-                    Library:Notify("Raid recreate failed, restarting", 3)
-                    LeaveRaid()
-                    raidBusy = false
-                    task.wait(1)
-                    continue
-                end
-                Library:Notify("Raid recreated successfully!", 3)
-                
-                local selectedMods = {}
-                pcall(function()
-                    if Options and Options.RaidModifiersDropdown and Options.RaidModifiersDropdown.Value then
-                        local val = Options.RaidModifiersDropdown.Value
-                        if type(val) == "table" then
-                            for mod, enabled in pairs(val) do
-                                if enabled then table.insert(selectedMods, mod) end
-                            end
-                        end
-                    end
-                end)
-                
-                if #selectedMods > 0 then
-                    pcall(function()
-                        SafeMissionCall("S_Missions", "ClearModifiers")
-                    end)
-                    task.wait(0.35)
-
-                    local applied, failed = ApplyModifiersWithRetry(selectedMods, function()
-                        return raidRunning
-                    end)
-
-                    if #failed == 0 then
-                        Library:Notify(string.format("Applied %d/%d modifiers", applied, #selectedMods), 3)
-                    else
-                        Library:Notify(string.format("Applied %d/%d (still failed: %s)", applied, #selectedMods, table.concat(failed, ", ")), 4)
-                    end
-                end
-                
-                if not raidRunning then
-                    raidBusy = false
-                    continue
-                end
-                
-                Library:Notify("Starting raid", 2)
-                StartRaid()
-                local startTick = tick()
-                repeat task.wait(0.05) until not raidRunning or raidSessionId ~= mySession or tick() - startTick >= 3.5
-                if RaidDelay > 0 then task.wait(RaidDelay) end
-                
+MissionTab:AddToggle("UseBoostedMapToggle", {
+    Text = "Use Boosted Map",
+    Default = false,
+    Callback = function(v)
+        useBoostedMap = v
+        if v then
+            local boosted = GetBoostedMap()
+            if boosted then
+                Library:Notify("Boosted Map mode ON → " .. boosted, 3)
             else
-                CreateRaid(currentBoss, currentDifficulty)
-                task.wait(0.2)
-                
-                if not GetMyMission() then
-                    Library:Notify("Raid creation failed, resetting lobby...", 2)
-                    LeaveRaid()
-                    raidBusy = false
-                    task.wait(0.5)
-                    continue
-                end
-                
-                Library:Notify("Recreating raid for stability...", 3)
-                LeaveRaid()
-                task.wait(0.3)
-                CreateRaid(currentBoss, currentDifficulty)
-                task.wait(0.2)
-                local ok = false
-                for retry = 1, 3 do
-                    if GetMyMission() then ok = true; break end
-                    task.wait(0.3)
-                end
-                if not ok then
-                    Library:Notify("Recreate failed, restarting", 3)
-                    LeaveRaid()
-                    raidBusy = false
-                    task.wait(1)
-                    continue
-                end
-                
-                local selectedMods = {}
-                pcall(function()
-                    if Options and Options.RaidModifiersDropdown and Options.RaidModifiersDropdown.Value then
-                        local val = Options.RaidModifiersDropdown.Value
-                        if type(val) == "table" then
-                            for mod, enabled in pairs(val) do
-                                if enabled then table.insert(selectedMods, mod) end
-                            end
-                        end
-                    end
-                end)
-                
-                if #selectedMods > 0 then
-                    pcall(function()
-                        SafeMissionCall("S_Missions", "ClearModifiers")
-                    end)
-                    task.wait(0.35)
-
-                    local applied, failed = ApplyModifiersWithRetry(selectedMods, function()
-                        return raidRunning
-                    end)
-
-                    if #failed == 0 then
-                        Library:Notify(string.format("Applied %d/%d modifiers", applied, #selectedMods), 3)
-                    else
-                        Library:Notify(string.format("Applied %d/%d (still failed: %s)", applied, #selectedMods, table.concat(failed, ", ")), 4)
-                    end
-                end
-                
-                if not raidRunning then
-                    raidBusy = false
-                    continue
-                end
-                
-                Library:Notify("Starting raid", 2)
-                StartRaid()
-                local startTick = tick()
-                repeat task.wait(0.05) until not raidRunning or raidSessionId ~= mySession or tick() - startTick >= 0.45
+                Library:Notify("Boosted Map mode ON (waiting for map...)", 3)
             end
-            raidBusy = false
+        else
+            Library:Notify("Boosted Map mode OFF", 2)
         end
     end
+})
 
-    RaidTab:AddDropdown("RaidBossDropdown", {
-        Values = {"Attack Titan","Armored Titan","Female Titan","Colossal Titan"},
-        Default = State_Raid.Boss,
-        Text = "Raid Boss",
-        Callback = function(v) State_Raid.Boss = v end
-    })
+MissionTab:AddDropdown("MissionDropdown", {
+    Values = {"Shiganshina","Trost","Outskirts","Forest","Utgard","Docks","Stohess","Chapel"},
+    Default = State_Mission.Name,
+    Text = "Mission",
+    Callback = function(val)
+        missionSelectionVersion += 1
+        State_Mission.Name = val
+        print("[Mission] Map selected:", val)
+        local newObjs = MissionObjectives[val] or {"Skirmish"}
+        State_Mission.Objective = newObjs[1]
+        if Options and Options.MissionObjectiveDropdown then
+            Options.MissionObjectiveDropdown:SetValues(newObjs)
+            Options.MissionObjectiveDropdown:SetValue(newObjs[1])
+        end
+    end
+})
 
-    RaidTab:AddDropdown("RaidDifficultyDropdown", {
-        Values = {"Easy","Normal","Hard","Severe","Aberrant","Hardest"},
-        Default = State_Raid.Difficulty,
-        Text = "Mode",
-        Callback = function(v) State_Raid.Difficulty = v end
-    })
+MissionTab:AddDropdown("MissionObjectiveDropdown", {
+    Values = MissionObjectives[State_Mission.Name] or {"Skirmish"},
+    Default = State_Mission.Objective,
+    Text = "Objective",
+    Callback = function(val)
+        State_Mission.Objective = val
+    end
+})
 
-    RaidTab:AddDropdown("RaidModifiersDropdown", {
-        Values = ModifiersList,
-        Default = {},
-        Multi = true,
-        Text = "Modifiers",
-        Callback = function() end
-    })
+MissionTab:AddDropdown("MissionDifficultyDropdown", {
+    Values = {"Easy","Normal","Hard","Severe","Aberrant","Hardest"},
+    Default = State_Mission.Difficulty,
+    Text = "Mode",
+    Callback = function(val)
+        State_Mission.Difficulty = val
+    end
+})
 
-    RaidTab:AddSlider("RaidDelaySlider", {
-        Text = "Delay",
-        Default = RaidDelay,
-        Min = 0, Max = 60, Rounding = 0,
-        Callback = function(v) RaidDelay = v end
-    })
+MissionTab:AddDropdown("MissionModifiersDropdown", {
+    Values = ModifiersList,
+    Default = {},
+    Multi = true,
+    Text = "Modifiers",
+    Callback = function() end
+})
 
-        local raidPendingStart = false
-    local raidStartTask = nil
+MissionTab:AddSlider("MissionDelaySlider", {
+    Text = "Delay",
+    Default = MissionDelay,
+    Min = 0,
+    Max = 60,
+    Rounding = 0,
+    Callback = function(v)
+        MissionDelay = v
+    end
+})
 
-    local raidToggle = RaidTab:AddToggle("AutoRaidToggle", {
-        Text = "Start Raid",
-        Default = false,
-        Callback = function(v)
-            if v then
-                if raidRunning or raidPendingStart then return end
-                if activeAutoContent ~= nil then
-                    Library:Notify("Select one Toggle", 2)
-                    pcall(function()
-                        if Options and Options.AutoRaidToggle then
-                            Options.AutoRaidToggle:SetValue(false)
-                        end
-                    end)
-                    return
-                end
-                activeAutoContent = "raid"
-                raidPendingStart = true
-                raidStartTask = task.spawn(function()
-                    while raidPendingStart do
-                        if isUIActive() then
-                            Library:Notify("Content Ready (Raid)", 2)
-                            break
-                        end
-                        task.wait(0.5)
+local activeAutoContent = nil
+
+local missionToggle = MissionTab:AddToggle("AutoStartMissionToggle", {
+    Text = "Start Mission",
+    Default = false,
+    Callback = function(v)
+        if v then
+            if missionRunning or missionPendingStart then return end
+            if activeAutoContent ~= nil then
+                Library:Notify("Select one Toggle", 2)
+                pcall(function()
+                    if Options and Options.AutoStartMissionToggle then
+                        Options.AutoStartMissionToggle:SetValue(false)
                     end
-                    if raidPendingStart then
-                        raidRunning = true
-                        raidBusy = false
-                        raidSessionId = raidSessionId + 1
-                        task.spawn(RaidLoop, raidSessionId)
-                    end
-                    raidPendingStart = false
                 end)
-            else
-                raidPendingStart = false
-                if raidStartTask then task.cancel(raidStartTask) end
-                raidRunning = false
-                raidSessionId = raidSessionId + 1
-                LeaveRaid()
-                if activeAutoContent == "raid" then activeAutoContent = nil end
+                return
+            end
+
+            print("[Mission] START TOGGLE = ON")
+            getgenv().MissionStarting = true
+            Library:Notify("Starting Mission Auto...", 2)
+            activeAutoContent = "mission"
+            missionPendingStart = true
+
+            missionStartTask = task.spawn(function()
+                if not missionPendingStart then return end
+
+                missionRunning = true
+                getgenv().MissionStarting = true
+                missionBusy = false
+                missionSessionId += 1
+                local session = missionSessionId
+
+                print("[Mission] missionRunning = true | session =", session)
+
+                task.spawn(function()
+                    local ok, err = pcall(function()
+                        MissionLoop(session)
+                    end)
+                    if not ok then
+                        warn("[Mission] MissionLoop Error:", err)
+                    end
+                end)
+
+                missionPendingStart = false
+            end)
+        else
+            missionPendingStart = false
+            if missionStartTask then
+                pcall(function() task.cancel(missionStartTask) end)
+                missionStartTask = nil
+            end
+            missionRunning = false
+            getgenv().MissionStarting = false
+            missionBusy = false
+            missionSessionId += 1
+            pcall(function() LeaveMission(true) end)
+            if activeAutoContent == "mission" then
+                activeAutoContent = nil
             end
         end
-    })
+    end
+})
 
+-- راقب تغيير الـ Boosted Map (اختياري لكن مفيد)
+task.spawn(function()
+    local lastBoosted = nil
+    while true do
+        task.wait(2)
+        if not useBoostedMap then 
+            lastBoosted = nil
+            continue 
+        end
+
+        local current = GetBoostedMap()
+        if current and current ~= lastBoosted then
+            lastBoosted = current
+            print("[Mission] Boosted Map changed to:", current)
+
+            local newObjs = MissionObjectives[current] or {"Skirmish"}
+            if Options and Options.MissionObjectiveDropdown then
+                pcall(function()
+                    Options.MissionObjectiveDropdown:SetValues(newObjs)
+                    local currentObj = Options.MissionObjectiveDropdown.Value
+                    local valid = false
+                    for _, o in ipairs(newObjs) do
+                        if o == currentObj then valid = true break end
+                    end
+                    if not valid then
+                        Options.MissionObjectiveDropdown:SetValue(newObjs[1])
+                    end
+                end)
+            end
+
+            Library:Notify("Boosted Map → " .. current, 3)
+        end
+    end
+end)
         local WavesTab = AutoMissionTabbox:AddTab("Waves")
 
     local wavesRunning = false
@@ -5905,6 +6357,129 @@ if IsLobbyLobby() then
             end)
         end
     })
+
+    -- ============================================================
+    -- Auto Equip Skills
+    -- Cobalt: GET "S_Equipment","Skill_State", slot(1-5), skillId(string)
+    -- Only nodes with ID/Cooldown are bar skills (abilities).
+    -- ============================================================
+    local EquipSkillsGroup = Tabs.Session:AddLeftGroupbox("Auto Equip Skills")
+
+    -- Load skill names from Modules.Storage.Skills
+    local SkillIdToName = {}
+    pcall(function()
+        local mod = require(game:GetService("ReplicatedStorage").Modules.Storage.Skills)
+        if type(mod) == "table" then
+            for id, data in pairs(mod) do
+                if type(data) == "table" and type(data.Tag) == "string" then
+                    SkillIdToName[tostring(id)] = data.Tag
+                    -- only real bar abilities have asset ID + cooldown
+                    if data.ID and data.Cooldown then
+                        SkillIdToName[tostring(id) .. "_ability"] = true
+                    end
+                end
+            end
+        end
+    end)
+
+    getgenv().SkillSlots = getgenv().SkillSlots or {
+        [1] = "76", -- Red Flare
+        [2] = "95", -- Black Flare
+        [3] = "26", -- Rising Slash
+        [4] = "7",  -- Blade Dance
+        [5] = "3",  -- Hand Grinder
+    }
+    getgenv().AutoEquipSkills = getgenv().AutoEquipSkills or false
+    getgenv().SkillEquipDelay = getgenv().SkillEquipDelay or 1.0
+
+    for i = 1, 5 do
+        local id = tostring(getgenv().SkillSlots[i] or "")
+        local tag = SkillIdToName[id]
+        local label = tag and string.format("Slot %d (%s)", i, tag) or ("Slot " .. i .. " Skill ID")
+        EquipSkillsGroup:AddInput("SkillSlot" .. i, {
+            Default = id,
+            Numeric = false,
+            Finished = true,
+            Text = label,
+            Placeholder = "e.g. 76",
+            Callback = function(v)
+                getgenv().SkillSlots[i] = tostring(v or ""):gsub("%s+", "")
+            end
+        })
+    end
+
+    EquipSkillsGroup:AddSlider("SkillEquipDelay", {
+        Text = "Delay between slots (s)",
+        Default = 1.0,
+        Min = 0.3,
+        Max = 2.5,
+        Rounding = 2,
+        Callback = function(v) getgenv().SkillEquipDelay = v end
+    })
+
+    local function equipAllSkills()
+        local Event = game:GetService("ReplicatedStorage").Assets.Remotes.GET
+        local delay = math.max(getgenv().SkillEquipDelay or 1.0, 0.5)
+
+        Library:Notify("Equipping skills one-by-one...", 2)
+        print("[Skills] ===== equip start =====")
+
+        pcall(function()
+            Event:InvokeServer("S_Equipment", "Skills")
+        end)
+        task.wait(0.6)
+
+        local function equipSlot(slot, id)
+            id = tostring(id)
+            local name = SkillIdToName[id] or "?"
+            local ok, res = pcall(function()
+                return Event:InvokeServer("S_Equipment", "Skill_State", slot, id)
+            end)
+            print(string.format("[Skills] Slot %d → %s (%s) ok=%s res=%s",
+                slot, id, name, tostring(ok), tostring(res)))
+            return ok
+        end
+
+        local sent = 0
+        for slot = 1, 5 do
+            local id = getgenv().SkillSlots and getgenv().SkillSlots[slot]
+            id = id and tostring(id):gsub("%s+", "") or ""
+            if id ~= "" and id ~= "0" then
+                for attempt = 1, 3 do
+                    local ok = equipSlot(slot, id)
+                    task.wait(delay)
+                    if ok then break end
+                    print(string.format("[Skills] retry slot %d attempt %d", slot, attempt + 1))
+                    task.wait(0.4)
+                end
+                sent = sent + 1
+                task.wait(0.5)
+            end
+        end
+
+        Library:Notify(string.format("Finished %d slots — check skill bar", sent), 4)
+        print("[Skills] ===== equip done =====")
+    end
+
+    EquipSkillsGroup:AddButton("Equip Skills Now", function()
+        task.spawn(equipAllSkills)
+    end)
+
+    EquipSkillsGroup:AddToggle("AutoEquipSkillsToggle", {
+        Text = "Auto Equip when Lobby loads",
+        Default = false,
+        Callback = function(v)
+            getgenv().AutoEquipSkills = v
+            if v then
+                task.spawn(function()
+                    task.wait(2.5)
+                    if getgenv().AutoEquipSkills and IsLobbyLobby() then
+                        equipAllSkills()
+                    end
+                end)
+            end
+        end
+    })
 end
 
 if IsLobbyLobby() then
@@ -5913,17 +6488,21 @@ if IsLobbyLobby() then
 
 
 -- ============================================================
--- Shadow Ban Checker (Lobby UI)
+-- Shadow Ban Checker (Attribute Auto Check)
 -- ============================================================
+
 local shadowBanWebhookURL = ""
 local ShadowHttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local StarterGui = game:GetService("StarterGui")
+
 local shadowBanEnabled = false
 local shadowBanWebhookSent = false
 local shadowBanChecking = false
-local shadowBanChecked = false
 
 
 local ShadowBanGroup = Tabs.Lobby:AddRightGroupbox("Shadow Ban Checker")
+
 
 ShadowBanGroup:AddInput("ShadowBanWebhookURL", {
     Default = "",
@@ -5946,12 +6525,17 @@ ShadowBanGroup:AddToggle("EnableShadowChecker", {
 })
 
 
-local function SendShadowBanWebhook(accountName)
+local function SendShadowBanWebhook(reason)
 
     if shadowBanWebhookURL == "" then
-        warn("[Shadow Ban Checker] Webhook URL is not configured.")
+        warn("[Shadow Ban] Webhook not configured")
         return false
     end
+
+    if shadowBanWebhookSent then
+        return false
+    end
+
 
     local requestFunction =
         (syn and syn.request)
@@ -5959,29 +6543,42 @@ local function SendShadowBanWebhook(accountName)
         or http_request
         or request
 
+
     if not requestFunction then
-        warn("[Shadow Ban Checker] No HTTP request function is available.")
+        warn("[Shadow Ban] No request function")
         return false
     end
+
+
+    local player = Players.LocalPlayer
 
 
     local body = ShadowHttpService:JSONEncode({
         content = "THIS ACCOUNT IS SHADOW BANNED !!",
         embeds = {{
-            title = "Shadow Ban Detected",
+            title = "🥀 Shadow Ban Detected",
             description = "**THIS ACCOUNT IS SHADOW BANNED !!**",
             fields = {
                 {
                     name = "Username",
-                    value = tostring(accountName),
+                    value = tostring(player.Name),
                     inline = true
                 },
                 {
                     name = "UserId",
-                    value = tostring(game.Players.LocalPlayer.UserId),
+                    value = tostring(player.UserId),
                     inline = true
+                },
+                {
+                    name = "Reason",
+                    value = tostring(reason),
+                    inline = false
                 }
-            }
+            },
+            footer = {
+                text = "Shadow Ban Checker"
+            },
+            timestamp = DateTime.now():ToIsoDate()
         }}
     })
 
@@ -5998,19 +6595,53 @@ local function SendShadowBanWebhook(accountName)
     end)
 
 
-    if not success then
-        warn("[Shadow Ban Checker] Webhook failed:", err)
+    if success then
+        shadowBanWebhookSent = true
+    else
+        warn("[Shadow Ban] Webhook failed:", err)
     end
+
 
     return success
 end
 
 
 
+local function CheckShadowBanAttributes()
+
+    local player = Players.LocalPlayer
+
+
+    local blacklisted =
+        player:GetAttribute("Blacklisted") == true
+
+
+    local exploiter =
+        player:GetAttribute("Exploiter") == true
+
+
+
+    if blacklisted then
+        return true, "Blacklisted Attribute"
+    end
+
+
+    if exploiter then
+        return true, "Exploiter Attribute"
+    end
+
+
+    return false, "Safe"
+
+end
+
+
+
+
 ShadowBanGroup:AddButton("Test Shadow Ban Webhook", function()
 
     if shadowBanWebhookURL == "" then
-        Library:Notify("Enter a Shadow Ban webhook URL first.", 3)
+        Library:Notify("Enter webhook first.", 3)
         return
     end
 
@@ -6023,19 +6654,21 @@ ShadowBanGroup:AddButton("Test Shadow Ban Webhook", function()
 
 
     if not requestFunction then
-        Library:Notify("No HTTP request function available.", 3)
+        Library:Notify("No HTTP request available.", 3)
         return
     end
+
+
+    local player = Players.LocalPlayer
 
 
     local body = ShadowHttpService:JSONEncode({
         content = "Shadow Ban Webhook Test",
         embeds = {{
             title = "Shadow Ban Webhook Test",
-            description = "The Shadow Ban webhook is configured correctly.",
             fields = {{
                 name = "Account",
-                value = tostring(game.Players.LocalPlayer.Name),
+                value = player.Name,
                 inline = true
             }}
         }}
@@ -6043,6 +6676,7 @@ ShadowBanGroup:AddButton("Test Shadow Ban Webhook", function()
 
 
     local success = pcall(function()
+
         requestFunction({
             Url = shadowBanWebhookURL,
             Method = "POST",
@@ -6051,13 +6685,14 @@ ShadowBanGroup:AddButton("Test Shadow Ban Webhook", function()
             },
             Body = body
         })
+
     end)
 
 
     if success then
-        Library:Notify("Shadow Ban test webhook sent.", 3)
+        Library:Notify("Shadow webhook test sent.", 3)
     else
-        Library:Notify("Shadow Ban webhook failed.", 3)
+        Library:Notify("Webhook failed.", 3)
     end
 
 end)
@@ -6065,86 +6700,12 @@ end)
 
 
 
-local function CheckShadowBanConfirmed(targetName)
-
-    local nilCount = 0
-
-
-    for i = 1, 10 do
-
-        local ok, result = pcall(function()
-
-            local shadowGET =
-                game:GetService("ReplicatedStorage")
-                :WaitForChild("Assets")
-                :WaitForChild("Remotes")
-                :WaitForChild("GET")
-
-
-            return shadowGET:InvokeServer(
-                "S_Market",
-                "Gift",
-                targetName
-            )
-
-        end)
-
-
-        print(
-            "[Shadow Ban Debug]",
-            targetName,
-            i,
-            ok,
-            result,
-            typeof(result)
-        )
-
-
-        -- لو ظهر false مرة واحدة يبقى سليم
-        if ok and result == false then
-            return "NOT_SHADOW_BANNED"
-        end
-
-
-        -- عد مرات nil
-        if ok and result == nil then
-            nilCount += 1
-        end
-
-
-        task.wait(1)
-
-    end
-
-
-    -- الخمس محاولات كلهم nil
-    if nilCount == 10 then
-        return "SHADOW_BANNED"
-    end
-
-
-    return "UNKNOWN"
-
-end
-
-
-
-
 ShadowBanGroup:AddButton("Check Current Account", function()
 
-    local player = game.Players.LocalPlayer
-
-    local status = CheckShadowBanConfirmed(player.Name)
+    local banned, reason = CheckShadowBanAttributes()
 
 
-    print(
-        "[Shadow Ban Checker]",
-        player.Name,
-        status
-    )
-
-
-    if status == "SHADOW_BANNED" then
+    if banned then
 
         Library:Notify(
             "THIS ACCOUNT IS SHADOW BANNED !!",
@@ -6152,16 +6713,19 @@ ShadowBanGroup:AddButton("Check Current Account", function()
         )
 
 
-        if not shadowBanWebhookSent then
-
-            if SendShadowBanWebhook(player.Name) then
-                shadowBanWebhookSent = true
-            end
-
-        end
+        SendShadowBanWebhook(reason)
 
 
-    elseif status == "NOT_SHADOW_BANNED" then
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = "Shadowban Checker",
+                Text = "bratha u are NOT safe 🥀",
+                Duration = 7
+            })
+        end)
+
+
+    else
 
         Library:Notify(
             "Account is NOT Shadow Banned.",
@@ -6169,17 +6733,9 @@ ShadowBanGroup:AddButton("Check Current Account", function()
         )
 
 
-    else
-
-        Library:Notify(
-            "Unknown Shadow Ban response.",
-            3
-        )
-
     end
 
 end)
-
 
 
 
@@ -6189,45 +6745,38 @@ task.spawn(function()
     task.wait(3)
 
 
-    while game.Players.LocalPlayer do
+    while Players.LocalPlayer do
 
 
-        if shadowBanEnabled 
-        and not shadowBanChecking 
-        and not shadowBanChecked then
-
+        if shadowBanEnabled and not shadowBanChecking then
 
             shadowBanChecking = true
 
 
-            local player = game.Players.LocalPlayer
-
-
-            local status =
-                CheckShadowBanConfirmed(player.Name)
-
-
-            print(
-                "[Shadow Ban Checker]",
-                player.Name,
-                status
-            )
-
-
-            shadowBanChecked = true
+            local banned, reason =
+                CheckShadowBanAttributes()
 
 
 
-            if status == "SHADOW_BANNED" then
+            if banned then
 
 
-                if not shadowBanWebhookSent then
+                Library:Notify(
+                    "Shadow Ban Detected 🥀",
+                    5
+                )
 
-                    if SendShadowBanWebhook(player.Name) then
-                        shadowBanWebhookSent = true
-                    end
 
-                end
+                SendShadowBanWebhook(reason)
+
+
+                pcall(function()
+                    StarterGui:SetCore("SendNotification", {
+                        Title = "Shadowban Checker",
+                        Text = "bratha u are NOT safe 🥀",
+                        Duration = 7
+                    })
+                end)
 
 
             end
@@ -6449,7 +6998,7 @@ end)
                             break
                         end
                         useBoost(boostName)
-                        task.wait(0.3)
+                        task.wait(0.15)
                     end
                     if not autoUseActive then break end
                 end
@@ -6653,20 +7202,90 @@ if IsLobbyLobby() then
 
     local MAX_LEVEL_FOR_PRESTIGE = {100, 125, 150, 175, 200}
 
-    local AllTalents = {
-        "Crescendo", "Blitzblade", "Swiftshot", "Surgeshot",
-        "Stalwart", "Stormcharged",
-        "Quakestrike", "Furyforge", "Assassin", "Amputation", "Marksman",
-        "Overslash", "Gambler", "Afterimages",
-        "Guardian", "Deflectra",
-        "Aegisurge", "Riposte",
-        "Resilience", "Vengeflare", "Steel Frame",
-        "Necromantic", "Thanatophobia",
-        "Cooldown Blitz", "Mendmaster",
-        "Lifefeed", "Vitalize", "Gem Fiend",
-        "Omnirange", "Flashstep", "Tactician",
-        "Bloodthief", "Apotheosis"
+    -- REAL talent IDs from ReplicatedStorage.Modules.Storage.Memories
+    local TalentIdToName = {
+        -- Offense
+        [1] = "Blitzblade",
+        [2] = "Crescendo",
+        [3] = "Swiftshot",
+        [30] = "Surgeshot",
+        [4] = "Stalwart",
+        [18] = "Stormcharged",
+        [5] = "Furyforge",
+        [6] = "Quakestrike",
+        [19] = "Assassin",
+        [20] = "Amputation",
+        [31] = "Supernova",
+        [21] = "Gambler",
+        [29] = "Overslash",
+        [32] = "Afterimages",
+        -- Defense
+        [7] = "Guardian",
+        [8] = "Deflectra",
+        [9] = "Aegisurge",
+        [22] = "Riposte",
+        [10] = "Vengeflare",
+        [11] = "Resilience",
+        [33] = "Steel Frame",
+        [23] = "Necromantic",
+        [24] = "Thanatophobia",
+        -- Support
+        [12] = "Mendmaster",
+        [13] = "Cooldown Blitz",
+        [14] = "Lifefeed",
+        [15] = "Vitalize",
+        [26] = "Gem Fiend",
+        [16] = "Flashstep",
+        [17] = "Omnirange",
+        [25] = "Tactician",
+        [27] = "Apotheosis",
+        [28] = "Bloodthief",
     }
+
+    -- also load live from module (stays correct if game adds talents)
+    pcall(function()
+        local mem = require(game:GetService("ReplicatedStorage").Modules.Storage.Memories)
+        if type(mem) == "table" and type(mem.Talents) == "table" then
+            for _, cat in pairs(mem.Talents) do
+                if type(cat) == "table" then
+                    for id, data in pairs(cat) do
+                        if type(data) == "table" and type(data.Tag) == "string" then
+                            local n = tonumber(id) or id
+                            TalentIdToName[n] = data.Tag
+                            TalentIdToName[tostring(id)] = data.Tag
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- string keys for every numeric entry
+    for k, v in pairs(table.clone and table.clone(TalentIdToName) or TalentIdToName) do
+        if type(k) == "number" then
+            TalentIdToName[tostring(k)] = v
+        end
+    end
+    -- safe string-key fill without table.clone dependency
+    do
+        local extra = {}
+        for k, v in pairs(TalentIdToName) do
+            if type(k) == "number" then extra[tostring(k)] = v end
+        end
+        for k, v in pairs(extra) do TalentIdToName[k] = v end
+    end
+
+    local AllTalents = {}
+    local TalentByIndex = {} -- name lower -> name
+    for id, name in pairs(TalentIdToName) do
+        if type(id) == "number" then
+            table.insert(AllTalents, name)
+            TalentByIndex[string.lower(name)] = name
+            TalentByIndex[id] = name
+            TalentByIndex[tostring(id)] = name
+        end
+    end
+    table.sort(AllTalents)
 
     local RemainingTalents = {}
     local function resetTalentPool()
@@ -6683,8 +7302,15 @@ if IsLobbyLobby() then
         return talent
     end
 
-    local PrestigeCooldown = 0.3
+    local PrestigeCooldown = 8
     local PrestigeRunning = false
+    local lastPrestigeAttempt = 0
+    local MIN_PRESTIGE_GAP = 12 -- hard min seconds between prestige remotes
+    local lastProbedTalents = {} -- names from last successful Probe / fetch
+    local lastProbedIds = {}     -- raw ids "26","1","12"
+    local lastProbedTime = 0
+    -- Send talent as ID (default) — names can be wrong vs game IDs and drain scrolls
+    getgenv().PrestigeSendAs = getgenv().PrestigeSendAs or "Name"
 
         local lastGoldNotifyStep = -1
     local lastGoldNotifyStatus = nil
@@ -6846,17 +7472,23 @@ if IsLobbyLobby() then
     })
 
     PrestigeGroup:AddDropdown("BoostDropdown", { 
-        Values = {"Luck Boost","Exp Boost","Gold Boost"}, 
+        Values = {"Luck Boost","EXP Boost","Gold Boost"}, 
         Default = getgenv().SelectedBoost, 
         Text = "Boost", 
         Callback = function(v) getgenv().SelectedBoost = v end 
     })
+    PrestigeGroup:AddDropdown("PrestigeSendAsDropdown", {
+        Values = {"Name", "ID"},
+        Default = getgenv().PrestigeSendAs or "Name",
+        Text = "Send talent as",
+        Callback = function(v) getgenv().PrestigeSendAs = v end
+    })
     PrestigeGroup:AddSlider("PrestigeCooldownSlider", { 
-        Text = "Delay", 
+        Text = "Delay (min 12s enforced)", 
         Default = PrestigeCooldown, 
-        Min = 0.2, 
-        Max = 2, 
-        Rounding = 1, 
+        Min = 8, 
+        Max = 30, 
+        Rounding = 0, 
         Suffix = "s", 
         Callback = function(v) PrestigeCooldown = v end 
     })
@@ -6952,38 +7584,110 @@ if IsLobbyLobby() then
 
         notifyStatus("ok", currentPrestige, currentLevel, currentXP, currentGold, true)
 
-        local talent = getRandomTalent()
-        if not talent then
-            resetTalentPool()
-            talent = getRandomTalent()
-            if not talent then
-                Library:Notify("No talent left for prestige", 3)
-                return false
-            end
+        -- Hard rate-limit: never spam Prestige remote
+        local now = tick()
+        if not force and (now - lastPrestigeAttempt) < MIN_PRESTIGE_GAP then
+            return false
         end
 
         local Event = game:GetService("ReplicatedStorage").Assets.Remotes.GET
-        pcall(function() Event:InvokeServer("S_Equipment", "Talents") end)
-        task.wait(0.35)
+
+        ----------------------------------------------------------------
+        local Event = game:GetService("ReplicatedStorage").Assets.Remotes.GET
+
+        -- Fetch Next_Talents ids and map via Memories TalentIdToName
+        local function fetchNextTalentIds()
+            local ids = {}
+            local ok, res = pcall(function()
+                return Event:InvokeServer("S_Equipment", "Talents")
+            end)
+            if not ok or type(res) ~= "table" or type(res.Slots) ~= "table" then return ids end
+            local key = res.Current_Slot or res.CurrentSlot or "A"
+            local slot = res.Slots[key] or res.Slots["A"]
+            local nextT = slot and slot.Next_Talents
+            if type(nextT) ~= "table" then return ids end
+            for _, id in pairs(nextT) do
+                table.insert(ids, tostring(id))
+            end
+            return ids
+        end
+
+        local nextIds = fetchNextTalentIds()
+        if #nextIds == 0 and #lastProbedIds > 0 and (tick() - lastProbedTime) < 90 then
+            for _, id in ipairs(lastProbedIds) do table.insert(nextIds, id) end
+        end
+        if #nextIds == 0 then
+            Library:Notify("No Next_Talents from server", 5)
+            return false
+        end
+
+        lastProbedIds = {}
+        for _, id in ipairs(nextIds) do table.insert(lastProbedIds, id) end
+        lastProbedTime = tick()
+
+        local parts = {}
+        local talentName = nil
+        for _, id in ipairs(nextIds) do
+            local nm = TalentIdToName[tonumber(id)] or TalentIdToName[id] or TalentIdToName[tostring(id)]
+            table.insert(parts, nm and (id .. "=" .. nm) or (id .. "=?"))
+            if not talentName and nm then
+                talentName = nm
+            end
+        end
+        Library:Notify("Next_Talents: " .. table.concat(parts, ", "), 5)
+        print("[Prestige] Next_Talents:", table.concat(parts, ", "))
+
+        if not talentName then
+            Library:Notify("Unknown talent ids [" .. table.concat(nextIds, ",") .. "] — not sending", 6)
+            return false
+        end
+
+        local boostArg = getgenv().SelectedBoost or "Gold Boost"
+        -- Cobalt: Boosts = "Gold Boost", Talents = "Furyforge"
+        lastPrestigeAttempt = tick()
+        task.wait(0.25)
 
         local ok, err = pcall(function()
             Event:InvokeServer("S_Equipment", "Prestige", {
-                Boosts = getgenv().SelectedBoost,
-                Talents = talent
+                Boosts = boostArg,
+                Talents = talentName,
             })
         end)
 
-        if ok then
-            Library:Notify(string.format("🚀 Prestige sent! Talent: %s | Boost: %s", tostring(talent), tostring(getgenv().SelectedBoost)), 5)
-            slotCache.time = 0 -- invalidate so next check is fresh
+        if not ok then
+            Library:Notify("Prestige remote error: " .. tostring(err), 5)
+            return false
+        end
+
+        Library:Notify(string.format("Prestige sent once → %s | %s (waiting...)", talentName, boostArg), 5)
+
+        -- Verify prestige actually increased
+        task.wait(2.5)
+        slotCache.time = 0
+        getSlotData(true)
+        local after = getCurrentPrestige()
+        if after > currentPrestige then
+            Library:Notify(string.format("✅ Prestige success P%d → P%d", currentPrestige, after), 5)
+            if after >= 5 and getgenv().PrestigeEnabled then
+                getgenv().PrestigeEnabled = false
+                pcall(function()
+                    if Options and Options.PrestigeToggle then Options.PrestigeToggle:SetValue(false) end
+                end)
+            end
         else
-            Library:Notify("Prestige remote failed: " .. tostring(err), 5)
+            Library:Notify(string.format("⚠️ Prestige did not apply (still P%d). Stopping auto to save scrolls.", after), 6)
+            if getgenv().PrestigeEnabled then
+                getgenv().PrestigeEnabled = false
+                pcall(function()
+                    if Options and Options.PrestigeToggle then Options.PrestigeToggle:SetValue(false) end
+                end)
+            end
         end
 
         lastStatusReason = nil
         lastGoldNotifyStep = -1
         lastGoldNotifyStatus = nil
-        return ok
+        return after > currentPrestige
     end
 
     PrestigeGroup:AddButton("Check Prestige Status", function()
@@ -6999,8 +7703,45 @@ if IsLobbyLobby() then
         end)
     end)
 
+    PrestigeGroup:AddButton("Probe Next_Talents", function()
+        task.spawn(function()
+            local Event = game:GetService("ReplicatedStorage").Assets.Remotes.GET
+            local ok, res = pcall(function()
+                return Event:InvokeServer("S_Equipment", "Talents")
+            end)
+            if not ok or type(res) ~= "table" then
+                Library:Notify("Talents fetch failed", 4)
+                return
+            end
+            local key = res.Current_Slot or "A"
+            local slot = res.Slots and (res.Slots[key] or res.Slots["A"])
+            local nextT = slot and slot.Next_Talents
+            local owned = slot and slot.Talents
+            local function resolveList(arr)
+                local parts = {}
+                if type(arr) ~= "table" then return "?" end
+                for _, id in pairs(arr) do
+                    local nm = TalentIdToName[tonumber(id)] or TalentIdToName[tostring(id)]
+                    table.insert(parts, nm and (tostring(id) .. "=" .. nm) or (tostring(id) .. "=?"))
+                end
+                return table.concat(parts, ", ")
+            end
+            local nextStr = resolveList(nextT)
+            local ownedStr = resolveList(owned)
+            print("[Probe] Next_Talents:", nextStr)
+            print("[Probe] Owned:", ownedStr)
+            Library:Notify("Next: " .. nextStr, 8)
+            Library:Notify("Owned: " .. ownedStr, 6)
+            lastProbedIds = {}
+            if type(nextT) == "table" then
+                for _, id in pairs(nextT) do table.insert(lastProbedIds, tostring(id)) end
+                lastProbedTime = tick()
+            end
+        end)
+    end)
+
     PrestigeGroup:AddButton("Force Prestige Now", function()
-        Library:Notify("Forcing prestige...", 2)
+        Library:Notify("Forcing prestige (1 attempt)...", 2)
         task.spawn(function()
             doPrestige(true)
         end)
@@ -7020,8 +7761,8 @@ if IsLobbyLobby() then
                 PrestigeRunning = false
             end
 
-            -- Don't poll faster than cache TTL; default cooldown still applies
-            local waitTime = math.max(PrestigeCooldown or 0.3, 1.0)
+            -- slow loop: never faster than 12s hard gap
+            local waitTime = math.max(PrestigeCooldown or 8, MIN_PRESTIGE_GAP)
             task.wait(waitTime)
         end
     end)
@@ -7115,7 +7856,7 @@ if IsLobbyLobby() then
     
         local function waitForCurrency()
         while not (Window and Window.Holder and Window.Holder.Visible) do
-            task.wait(0.1)
+            task.wait(0.2)
         end
         
         local gold, gems = 0, 0
@@ -7141,7 +7882,7 @@ if IsLobbyLobby() then
             local GET = game:GetService("ReplicatedStorage"):WaitForChild("Assets"):WaitForChild("Remotes"):WaitForChild("GET")
             GET:InvokeServer("S_Achievements", "Category", 5)
         end)
-        task.wait(0.2)
+        task.wait(0.3)
         
         for id = 1, 71 do
             if not getgenv().ClaimAchievementEnabled then break end
@@ -7508,7 +8249,7 @@ if IsIngameLobby() and Tabs.AutoFarm then
 
         task.spawn(function()
             while StatsEnabled and Gui.Parent do
-                task.wait(0.3)
+                task.wait(0.15)
                 
                 local objectivesVisible = isObjectivesVisible()
                 local elapsed = getFarmElapsedTime()
@@ -7729,7 +8470,7 @@ if Tabs.AutoFarm then
     SafetyGroup:AddSlider("StopAtTitansLeftSlider", {
         Text="Stop attacking when .. titans Left",
         Default = getgenv().StopAtTitansLeft,
-        Min = 10,
+        Min = 0,
         Max = 25,
         Rounding = 0,
         Callback = function(val)
@@ -7793,7 +8534,9 @@ if Tabs.AutoFarm then
     G.SafetyTime = G.SafetyTime or 60
     G.LeaveMinimum = 1
     G.AttackInterval = 0.15
-    G.KillHits = 9  
+    G.KillHits = 9
+    G.HitDistance = G.HitDistance or 80          -- hitbox expand size (studs)
+    G.HitDistanceEnabled = G.HitDistanceEnabled ~= false  -- default ON
 
     G.ThunderSpearFarmMode = "Tween"
     G.ThunderSpearHoverSpeed = 120
@@ -7926,6 +8669,29 @@ if Tabs.AutoFarm then
         Text="Kill Hits", Default=9, Min=9, Max=9, Rounding=0,
         Callback=function(val)
             if not syncingWeapon then G.KillHits = val end
+        end
+    })
+
+    BladeTab:AddSlider("HitDistanceSlider", {
+        Text = "Hit Distance",
+        Default = G.HitDistance or 1000,
+        Min = 10,
+        Max = 1000,
+        Rounding = 0,
+        Callback = function(val)
+            if not syncingWeapon then
+                G.HitDistance = val
+            end
+        end
+    })
+
+    BladeTab:AddToggle("HitDistanceToggle", {
+        Text = "Enable Hit Distance",
+        Default = G.HitDistanceEnabled ~= false,
+        Callback = function(v)
+            if not syncingWeapon then
+                G.HitDistanceEnabled = v
+            end
         end
     })
 
@@ -8156,6 +8922,29 @@ if Tabs.AutoFarm then
     SpearTab:AddSlider("ThunderSpear_HoverHeight", {
         Text="Hover Height", Default=120, Min=0, Max=400, Rounding=0,
         Callback=function(v) if not syncingWeapon then G.ThunderSpearHoverHeight = v end end
+    })
+
+    SpearTab:AddSlider("SpearHitDistanceSlider", {
+        Text = "Hit Distance",
+        Default = G.HitDistance or 80,
+        Min = 10,
+        Max = 300,
+        Rounding = 0,
+        Callback = function(val)
+            if not syncingWeapon then
+                G.HitDistance = val
+            end
+        end
+    })
+
+    SpearTab:AddToggle("SpearHitDistanceToggle", {
+        Text = "Enable Hit Distance",
+        Default = G.HitDistanceEnabled ~= false,
+        Callback = function(v)
+            if not syncingWeapon then
+                G.HitDistanceEnabled = v
+            end
+        end
     })
 
     task.spawn(function()
@@ -8771,6 +9560,7 @@ local ActiveTitans = {}
 local LastScan = 0
 local SCAN_RATE = 0.03
 local NapeCache = setmetatable({}, {__mode = "k"})
+local OriginalHitSizes = setmetatable({}, {__mode = "k"})  -- part -> original Size
 
 local LastTitanPosition = nil
 local LastTitanHoverHeight = 120
@@ -8783,10 +9573,67 @@ local function IsTitanAlive(t)
     return success and h and h.Health > 10
 end
 
+local function ExpandHitboxPart(part)
+    if not part or not part:IsA("BasePart") then return end
+    local G = getgenv()
+    if not G.HitDistanceEnabled then return end
+    local targetSize = tonumber(G.HitDistance) or 80
+    if targetSize < 5 then targetSize = 5 end
+
+    if not OriginalHitSizes[part] then
+        OriginalHitSizes[part] = part.Size
+    end
+
+    local desired = Vector3.new(targetSize, targetSize, targetSize)
+    if (part.Size - desired).Magnitude > 0.5 then
+        pcall(function()
+            part.Size = desired
+            part.CanCollide = false
+            part.Massless = true
+        end)
+    end
+end
+
+local function ApplyHitDistanceToTitan(t)
+    if not t then return end
+    local G = getgenv()
+    if not G.HitDistanceEnabled then return end
+
+    pcall(function()
+        local hitboxes = t:FindFirstChild("Hitboxes")
+        if not hitboxes then return end
+        local hit = hitboxes:FindFirstChild("Hit")
+        if hit then
+            if hit:IsA("BasePart") then
+                ExpandHitboxPart(hit)
+            end
+            local nape = hit:FindFirstChild("Nape")
+            if nape and nape:IsA("BasePart") then
+                ExpandHitboxPart(nape)
+            end
+            -- expand other common weak points too
+            for _, child in ipairs(hit:GetChildren()) do
+                if child:IsA("BasePart") then
+                    ExpandHitboxPart(child)
+                end
+            end
+        end
+        -- some titans put hit parts directly under Hitboxes
+        for _, child in ipairs(hitboxes:GetChildren()) do
+            if child:IsA("BasePart") then
+                ExpandHitboxPart(child)
+            end
+        end
+    end)
+end
+
 local function GetNape(t)
     if not t then return nil end
     local c = NapeCache[t]
-    if c then return c end
+    if c then
+        ApplyHitDistanceToTitan(t)
+        return c
+    end
     local success, hitboxes = pcall(function()
         return t:FindFirstChild("Hitboxes")
     end)
@@ -8800,6 +9647,7 @@ local function GetNape(t)
             end)
             if success3 and nape and nape:IsA("BasePart") then
                 NapeCache[t] = nape
+                ApplyHitDistanceToTitan(t)
                 return nape
             end
         end
@@ -8839,6 +9687,7 @@ local function ScanTitans()
             end
             local nape = GetNape(t)
             if nape then
+                ApplyHitDistanceToTitan(t)
                 local isBoss = BOSS_NAMES[t.Name] or false
                 if t.Name == "Attack_Titan" then attackFound = true end
                 table.insert(ActiveTitans, {titan = t, nape = nape, isBoss = isBoss, titanName = t.Name})
@@ -9397,6 +10246,16 @@ local LastSpearAttackTime = 0
 local SPEAR_ATTACK_INTERVAL = 0.1
 local CurrentFirePower = 8
 local EXPLODE_RADIUS = 0.14
+-- Hit Distance also boosts spear AOE when enabled
+local function getExplodeRadius()
+    local G = getgenv()
+    if G.HitDistanceEnabled and G.HitDistance then
+        -- map 10-300 studs → roughly 0.14 - 2.5 explode radius
+        local t = math.clamp((G.HitDistance - 10) / 290, 0, 1)
+        return 0.14 + t * 2.4
+    end
+    return EXPLODE_RADIUS
+end
 getgenv().SpearFarm = getgenv().SpearFarm or false
 
 local cachedSpearRefill = nil
@@ -9474,7 +10333,7 @@ local function ThunderAOEAttack()
         local nape = entry.nape
         if nape then
             pcall(function()
-                POST:FireServer("Spears", "S_Explode", Vector3.new(nape.Position.X, nape.Position.Y, nape.Position.Z), EXPLODE_RADIUS)
+                POST:FireServer("Spears", "S_Explode", Vector3.new(nape.Position.X, nape.Position.Y, nape.Position.Z), getExplodeRadius())
             end)
         end
     end
@@ -9800,7 +10659,7 @@ local function ThunderAOEAttack()
         local nape = entry.nape
         if nape then
             pcall(function()
-                POST:FireServer("Spears", "S_Explode", Vector3.new(nape.Position.X, nape.Position.Y, nape.Position.Z), EXPLODE_RADIUS)
+                POST:FireServer("Spears", "S_Explode", Vector3.new(nape.Position.X, nape.Position.Y, nape.Position.Z), getExplodeRadius())
             end)
         end
     end
@@ -10504,7 +11363,7 @@ if Tabs.Webhook then
                 end
                 lastData = data
             end
-            task.wait(0.3)
+            task.wait(0.15)
         end
         return lastData
     end
@@ -10563,6 +11422,247 @@ if Tabs.Webhook then
         end
         return formatted
     end
+
+    -- ===== Mission Timer helpers for webhook =====
+    local function formatMissionTimer(seconds)
+        if type(seconds) == "string" then
+            -- already formatted like "12:34" or "1:02:03"
+            if seconds:match("^%d+:%d%d:%d%d$") or seconds:match("^%d+:%d%d$") then
+                return seconds
+            end
+            local n = tonumber(seconds:match("[%d%.]+"))
+            if n then seconds = n else return seconds end
+        end
+        if type(seconds) ~= "number" or seconds < 0 then
+            return "00:00"
+        end
+        -- if value looks like milliseconds, convert
+        if seconds > 100000 then
+            seconds = seconds / 1000
+        end
+        seconds = math.floor(seconds)
+        local h = math.floor(seconds / 3600)
+        local m = math.floor((seconds % 3600) / 60)
+        local s = seconds % 60
+        if h > 0 then
+            return string.format("%02d:%02d:%02d", h, m, s)
+        end
+        return string.format("%02d:%02d", m, s)
+    end
+
+    local function parseTimeValue(v)
+        if type(v) == "number" and v > 0 then
+            return v
+        end
+        if type(v) == "string" and v ~= "" and v ~= "0" and v ~= "00:00" then
+            -- normalize roman-looking I from some fonts → digit 1
+            local cleaned = v:gsub("[Ii]", "1"):gsub("%s+", "")
+            local h, m, s = cleaned:match("^(%d+):(%d+):(%d+)$")
+            if h then
+                return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+            end
+            local mm, ss = cleaned:match("^(%d+):(%d+)$")
+            if mm then
+                return tonumber(mm) * 60 + tonumber(ss)
+            end
+            local n = tonumber(cleaned:match("[%d%.]+"))
+            if n and n > 0 then
+                return n
+            end
+        end
+        return nil
+    end
+
+    -- Read TIME TAKEN directly from Rewards UI (most accurate — what the game shows)
+    local function readTimeTakenFromUI()
+        local player = game:GetService("Players").LocalPlayer
+        if not player or not player.PlayerGui then return nil end
+
+        local statsFrame = nil
+        pcall(function()
+            statsFrame = player.PlayerGui.Interface.Rewards.Main.Info.Main.Stats
+        end)
+        if not statsFrame then
+            local sf, _ = findUIElements()
+            statsFrame = sf
+        end
+        if not statsFrame then return nil end
+
+        -- Preferred: frame named Time_Taken / TimeTaken / Time
+        local preferredNames = {
+            "Time_Taken", "TimeTaken", "Time", "TIME_TAKEN", "Timer", "Duration"
+        }
+        for _, name in ipairs(preferredNames) do
+            local frame = statsFrame:FindFirstChild(name)
+            if frame then
+                local amount = frame:FindFirstChild("Amount") or frame:FindFirstChild("Value") or frame:FindFirstChild("Text")
+                if amount and amount:IsA("TextLabel") and amount.Text and amount.Text ~= "" then
+                    local parsed = parseTimeValue(amount.Text)
+                    if parsed then return parsed, amount.Text end
+                    return nil, amount.Text
+                end
+                -- sometimes the frame itself is a TextLabel
+                if frame:IsA("TextLabel") and frame.Text and frame.Text:find(":") then
+                    local parsed = parseTimeValue(frame.Text)
+                    if parsed then return parsed, frame.Text end
+                end
+            end
+        end
+
+        -- Scan all stat frames for time-like values or labels containing TIME
+        for _, v in ipairs(statsFrame:GetChildren()) do
+            if v:IsA("Frame") or v:IsA("TextLabel") then
+                local nameLower = string.lower(v.Name or "")
+                local amount = v:FindFirstChild("Amount") or v:FindFirstChild("Value")
+                local statLabel = v:FindFirstChild("Stat") or v:FindFirstChild("Title") or v:FindFirstChild("Name")
+                local amountText = amount and amount:IsA("TextLabel") and amount.Text or nil
+                local labelText = statLabel and statLabel:IsA("TextLabel") and statLabel.Text or ""
+
+                local isTimeRow = nameLower:find("time") or nameLower:find("duration") or nameLower:find("timer")
+                    or (type(labelText) == "string" and (labelText:upper():find("TIME") or labelText:upper():find("DURATION")))
+
+                if isTimeRow and amountText and amountText ~= "" then
+                    local parsed = parseTimeValue(amountText)
+                    if parsed then return parsed, amountText end
+                    return nil, amountText
+                end
+
+                -- amount text itself looks like MM:SS
+                if amountText and amountText:match("%d+:%d+") then
+                    local parsed = parseTimeValue(amountText)
+                    if parsed then return parsed, amountText end
+                end
+            end
+        end
+
+        -- Deep scan under Rewards for any TextLabel showing MM:SS near "TIME"
+        local rewards = nil
+        pcall(function()
+            rewards = player.PlayerGui.Interface.Rewards
+        end)
+        if rewards then
+            local best = nil
+            pcall(function()
+                for _, d in ipairs(rewards:GetDescendants()) do
+                    if d:IsA("TextLabel") and d.Text then
+                        local t = d.Text
+                        if t:match("^%d+:%d%d$") or t:match("^%d+:%d%d:%d%d$") then
+                            local parentName = string.lower(tostring(d.Parent and d.Parent.Name or ""))
+                            if parentName:find("time") or parentName:find("amount") or parentName:find("stat") then
+                                best = t
+                                break
+                            end
+                            if not best then best = t end
+                        end
+                    end
+                end
+            end)
+            if best then
+                local parsed = parseTimeValue(best)
+                if parsed then return parsed, best end
+                return nil, best
+            end
+        end
+
+        return nil
+    end
+
+    local function extractTimeFromRewardData(rewardData)
+        if type(rewardData) ~= "table" then return nil end
+
+        local candidates = {
+            rewardData.Time,
+            rewardData.Timer,
+            rewardData.Duration,
+            rewardData.Elapsed,
+            rewardData.ClearTime,
+            rewardData.Clear_Time,
+            rewardData.TimeTaken,
+            rewardData.Time_Taken,
+            rewardData.MissionTime,
+            rewardData.Mission_Time,
+            rewardData.CompletedTime,
+            rewardData.Completed_Time,
+            rewardData.PlayTime,
+            rewardData.Play_Time,
+            rewardData.Stats and rewardData.Stats.Time,
+            rewardData.Stats and rewardData.Stats.Timer,
+            rewardData.Stats and rewardData.Stats.Duration,
+            rewardData.Stats and rewardData.Stats.Elapsed,
+            rewardData.Stats and rewardData.Stats.ClearTime,
+            rewardData.Stats and rewardData.Stats.TimeTaken,
+            rewardData.Stats and rewardData.Stats.Time_Taken,
+            rewardData.Stats and rewardData.Stats.PlayTime,
+            rewardData.Obtained and rewardData.Obtained.Time,
+            rewardData.Obtained and rewardData.Obtained.Duration,
+            rewardData.Info and rewardData.Info.Time,
+            rewardData.Info and rewardData.Info.Duration,
+            rewardData.Result and rewardData.Result.Time,
+            rewardData.Result and rewardData.Result.Duration,
+        }
+
+        for _, v in ipairs(candidates) do
+            local parsed = parseTimeValue(v)
+            if parsed then return parsed end
+        end
+
+        -- Soft scan: any key containing "time" / "duration" / "elapsed"
+        local function softScan(tbl, depth)
+            if type(tbl) ~= "table" or depth > 3 then return nil end
+            for k, v in pairs(tbl) do
+                local key = string.lower(tostring(k))
+                if key:find("time") or key:find("duration") or key:find("elapsed") or key:find("clear") then
+                    local parsed = parseTimeValue(v)
+                    if parsed then return parsed end
+                end
+                if type(v) == "table" then
+                    local nested = softScan(v, depth + 1)
+                    if nested then return nested end
+                end
+            end
+            return nil
+        end
+
+        return softScan(rewardData, 0)
+    end
+
+    local function getMissionElapsedForWebhook(rewardData)
+        -- 1) UI TIME TAKEN (what the game shows on rewards screen)
+        local uiSeconds, uiRaw = readTimeTakenFromUI()
+        if uiSeconds and uiSeconds > 0 then
+            return uiSeconds, uiRaw
+        end
+        if type(uiRaw) == "string" and uiRaw ~= "" then
+            return parseTimeValue(uiRaw) or 0, uiRaw
+        end
+
+        -- 2) S_Rewards remote data
+        local fromRewards = extractTimeFromRewardData(rewardData)
+        if fromRewards and fromRewards > 0 then
+            return fromRewards
+        end
+
+        -- 3) Local farm timer fallback
+        if getgenv().FarmTimerStarted and getgenv().FarmStartTime then
+            return tick() - getgenv().FarmStartTime
+        end
+        if getgenv().FarmStartTime then
+            return tick() - getgenv().FarmStartTime
+        end
+        return 0
+    end
+
+    local function getMissionTimerDisplay(rewardData)
+        local seconds, raw = getMissionElapsedForWebhook(rewardData)
+        if type(raw) == "string" and raw:match("%d+:%d+") then
+            -- keep original UI text if it's already MM:SS
+            local cleaned = raw:gsub("[Ii]", "1"):gsub("%s+", "")
+            if cleaned:match("^%d+:%d%d$") or cleaned:match("^%d+:%d%d:%d%d$") then
+                return cleaned
+            end
+        end
+        return formatMissionTimer(seconds)
+    end
     
     -- ===== ฟังก์ชันดึงข้อมูล Reward แบบเรียลไทม์ =====
     local function getRealTimeRewardData()
@@ -10614,23 +11714,29 @@ if Tabs.Webhook then
         local rewardData = getRealTimeRewardData()
         
         if not rewardData then
-            -- Fallback: ใช้ข้อมูลจาก UI
+            -- Fallback: read from Rewards UI
             local statsFrame, _ = findUIElements()
             local stats = {}
             if statsFrame then
                 for _, v in ipairs(statsFrame:GetChildren()) do
-                    if v:IsA("Frame") and v:FindFirstChild("Stat") and v:FindFirstChild("Amount") then
-                        local statName = string.gsub(v.Name, "_", " ")
-                        stats[statName] = v.Amount.Text
+                    if v:IsA("Frame") then
+                        local amount = v:FindFirstChild("Amount")
+                        if amount and amount:IsA("TextLabel") then
+                            local statName = string.gsub(v.Name, "_", " ")
+                            stats[statName] = amount.Text
+                            stats[string.lower(statName)] = amount.Text
+                            stats[v.Name] = amount.Text
+                        end
                     end
                 end
             end
             
             local rewardsUI = getAllRewards()
-            local kills = stats["Kills"] or 0
-            local crits = stats["Crits"] or 0
-            local damage = stats["Damage"] or "0"
-            local damageNum = tonumber(damage:gsub("[^%d.]", "")) or 0
+            local kills = stats["Titans Killed"] or stats["titans killed"] or stats["Titans_Killed"] or stats["Kills"] or stats["kills"] or 0
+            local crits = stats["Critical Hits"] or stats["critical hits"] or stats["Critical_Hits"] or stats["Crits"] or stats["crits"] or 0
+            local damage = stats["Damage Dealt"] or stats["damage dealt"] or stats["Damage_Dealt"] or stats["Damage"] or stats["damage"] or "0"
+            local damageNum = tonumber(tostring(damage):gsub("[^%d.]", "")) or 0
+            local missionTimerStr = getMissionTimerDisplay(nil)
             
             local xp, gold, gems, shards = 0, 0, 0, 0
             for _, item in ipairs(rewardsUI) do
@@ -10658,10 +11764,10 @@ if Tabs.Webhook then
                     title = string.format("[%s] %s", statusTitle, player.Name),
                     color = color,
                     fields = {
-                        { name = "STATS", value = string.format("Kills: %s\nCrits: %s\nDamage: %s", kills, crits, formatNumberWithComma(damageNum)), inline = false },
+                        { name = "STATS", value = string.format("Time: %s\nKills: %s\nCrits: %s\nDamage: %s", missionTimerStr, kills, crits, formatNumberWithComma(damageNum)), inline = false },
                         { name = "REWARDS", value = string.format("XP: %s\nGold: %s\nGems: %s\nShards: %s", formatNumberWithComma(xp), formatNumberWithComma(gold), formatNumberWithComma(gems), formatNumberWithComma(shards)), inline = false },
                         { name = "PERKS", value = perksList, inline = false },
-                        { name = "INFO", value = string.format("User: %s\nExecutor: %s\nGames Played: %d\nGold: %s\nGems: %s", player.Name, executor, gamesPlayed, formatNumberWithComma(totalData.Gold), formatNumberWithComma(totalData.Gems)), inline = false }
+                        { name = "INFO", value = string.format("User: %s\nExecutor: %s\nGames Played: %d\nGold: %s\nGems: %s\nMission Timer: %s", player.Name, executor, gamesPlayed, formatNumberWithComma(totalData.Gold), formatNumberWithComma(totalData.Gems), missionTimerStr), inline = false }
                     },
                     footer = { text = "TownShip • " .. os.date("%Y-%m-%d %H:%M:%S") },
                     timestamp = DateTime.now():ToIsoDate()
@@ -10677,6 +11783,7 @@ if Tabs.Webhook then
         local kills = rewardData.Stats and rewardData.Stats.Kills or 0
         local crits = rewardData.Stats and rewardData.Stats.Crits or 0
         local damage = rewardData.Stats and rewardData.Stats.Damage or 0
+        local missionTimerStr = getMissionTimerDisplay(rewardData)
         
         local xp = rewardData.Obtained and rewardData.Obtained.XP or 0
         local gold = rewardData.Obtained and rewardData.Obtained.Gold or 0
@@ -10713,10 +11820,10 @@ if Tabs.Webhook then
                 title = string.format("[%s] %s", statusTitle, player.Name),
                 color = color,
                 fields = {
-                    { name = "STATS", value = string.format("Kills: %s\nCrits: %s\nDamage: %s", kills, crits, formatNumberWithComma(damage)), inline = false },
+                    { name = "STATS", value = string.format("Kills: %s\nCrits: %s\nDamage: %s\nTime: %s", kills, crits, formatNumberWithComma(damage), missionTimerStr), inline = false },
                     { name = "REWARDS", value = string.format("XP: %s\nGold: %s\nGems: %s\nShards: %s", formatNumberWithComma(xp), formatNumberWithComma(gold), formatNumberWithComma(gems), formatNumberWithComma(shards)), inline = false },
                     { name = "PERKS", value = perksList, inline = false },
-                    { name = "INFO", value = string.format("User: %s\nExecutor: %s\nGames Played: %d\nGold: %s\nGems: %s", player.Name, executor, gamesPlayed, formatNumberWithComma(totalData.Gold), formatNumberWithComma(totalData.Gems)), inline = false }
+                    { name = "INFO", value = string.format("User: %s\nExecutor: %s\nGames Played: %d\nGold: %s\nGems: %s\nMission Timer: %s", player.Name, executor, gamesPlayed, formatNumberWithComma(totalData.Gold), formatNumberWithComma(totalData.Gems), missionTimerStr), inline = false }
                 },
                 footer = { text = "TownShip • " .. os.date("%Y-%m-%d %H:%M:%S") },
                 timestamp = DateTime.now():ToIsoDate()
@@ -10897,15 +12004,27 @@ if Tabs.Webhook then
         if not serverData or not serverData.Slots then return end
         local slot = serverData.Slots[serverData.Current_Slot or "A"]
         if not slot then return end
+
+        -- Prefer UI TIME TAKEN, then S_Rewards
+        local rewardDataForTimer = getRealTimeRewardData()
+        local timerStr = getMissionTimerDisplay(rewardDataForTimer)
+
         local fields = {}
         if serverData.Map then
             local modsText = formatModifiersText(serverData.Map.Modifiers)
-            local mapValue = string.format("Map: %s\nDifficulty: %s\nObjective: %s\n\nModifiers:\n%s",
+            local mapValue = string.format("Map: %s\nDifficulty: %s\nObjective: %s\nMission Timer: %s\n\nModifiers:\n%s",
                 serverData.Map.Map or "Unknown",
                 serverData.Map.Difficulty or "Unknown",
                 serverData.Map.Objective or "Unknown",
+                timerStr,
                 modsText)
             table.insert(fields, {name = "Mission Info", value = mapValue, inline = false})
+        else
+            table.insert(fields, {
+                name = "Mission Timer",
+                value = timerStr,
+                inline = true
+            })
         end
         if filters.Currency then
             table.insert(fields, {name = "Currency", value = string.format("Gold: %s\nGems: %s\nCanes: %s\nShards: %s",
@@ -11214,6 +12333,42 @@ if IsIngameLobby() and Tabs.Webhook then
                             end
                         end
 
+                                                -- Shadow Ban Status (Lobby/Main Menu only)
+                                                local function IsInMission()
+                                                    local player = game:GetService("Players").LocalPlayer
+
+                                                    if player:GetAttribute("InMission") == true then
+                                                        return true
+                                                    end
+
+                                                    if player:GetAttribute("Mission") == true then
+                                                        return true
+                                                    end
+
+                                                    return false
+                                                end
+
+                                                local function GetShadowBanStatus()
+                                                    local player = game:GetService("Players").LocalPlayer
+
+                                                    if player:GetAttribute("Blacklisted") == true then
+                                                        return "SHADOW BANNED"
+                                                    end
+
+                                                    if player:GetAttribute("Exploiter") == true then
+                                                        return "SHADOW BANNED"
+                                                    end
+
+                                                    return "SAFE"
+                                                end
+
+                                                if not IsInMission() then
+                                                    table.insert(
+                                                        parts,
+                                                        "Shadow Ban: " .. GetShadowBanStatus()
+                                                    )
+                                                end
+
                                                 local description = table.concat(parts, "  ")
 
                         if _G and _G.Horst_SetDescription then
@@ -11243,7 +12398,7 @@ if Tabs.AutoFarm then
     local VirtualInputManager = game:GetService("VirtualInputManager")
     local lp = Players.LocalPlayer
 
-    local CLICK_DELAY = 1.0
+    local CLICK_DELAY = 0.5
 
     local function clickSkipButton()
         local playerGui = lp:FindFirstChild("PlayerGui")
