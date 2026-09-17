@@ -525,12 +525,16 @@ if IsLobbyLobby() then
             },
         }
 
-        -- Confirmed IDs (add more when captured via remote spy)
         local BOOST_IDS = {
-            -- Gold: 30m=7, 1h=8, 2h=9 (captured via Cobalt)
             Gold = { ["2h"] = 9, ["1h"] = 8, ["30m"] = 7 },
             Luck = { ["2h"] = nil, ["1h"] = nil, ["30m"] = nil },
             XP   = { ["2h"] = nil, ["1h"] = nil, ["30m"] = nil },
+        }
+
+        local BOOST_DURATION = {
+            ["2h"] = 7200,
+            ["1h"] = 3600,
+            ["30m"] = 1800,
         }
 
         local TIER_PRIORITY = {"2h", "1h", "30m"}
@@ -538,11 +542,69 @@ if IsLobbyLobby() then
         local boostState = {
             enabled = false,
             selected = { Gold = true, Luck = false, XP = false },
-            cycleDelay = 6,
+            cycleDelay = 1,
             bought = 0,
             used = 0,
             cycles = 0,
         }
+
+        -- Runtime protection against duplicate Gold purchases.
+        local goldRuntime = {
+            activeUntil = 0,
+            purchaseLockUntil = 0,
+            lastBuyAt = 0,
+            lastUseAt = 0,
+            inventoryChecked = false,
+        }
+
+        -- Gold debug output.
+        -- Only prints when the state changes so the console does not get spammed.
+        local lastGoldDebugState = nil
+
+        local function goldDebug(state, message)
+            if lastGoldDebugState == state then
+                return
+            end
+
+            lastGoldDebugState = state
+            print("[GoldBoost] " .. tostring(message))
+        end
+
+        local function parseTimerText(text)
+            if type(text) ~= "string" then
+                return nil
+            end
+
+            text = text:gsub("^%s+", ""):gsub("%s+$", "")
+
+            -- HH:MM:SS
+            local h, m, s = text:match("(%d+):(%d+):(%d+)")
+            if h then
+                return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+            end
+
+            -- MM:SS
+            local mm, ss = text:match("^(%d+):(%d+)$")
+            if mm then
+                return tonumber(mm) * 60 + tonumber(ss)
+            end
+
+            -- Formats such as "2h 14m 05s", "30m", "45s"
+            local hours = tonumber(text:match("(%d+)%s*[hH]")) or 0
+            local mins = tonumber(text:match("(%d+)%s*[mM]")) or 0
+            local secs = tonumber(text:match("(%d+)%s*[sS]")) or 0
+
+            if hours > 0 or mins > 0 or secs > 0 then
+                return hours * 3600 + mins * 60 + secs
+            end
+
+            -- Plain numeric seconds.
+            if text:match("^%d+$") then
+                return tonumber(text)
+            end
+
+            return nil
+        end
 
         local function readBoostTimer(boostType)
             local paths = {
@@ -555,177 +617,540 @@ if IsLobbyLobby() then
                 function()
                     return Player.PlayerGui.Interface.Gear_Up.Boosts[boostType].Timer.Time
                 end,
+                function()
+                    return Player.PlayerGui.Interface.Gear_Up.Boosts[boostType].Timer
+                end,
             }
+
             for _, getter in ipairs(paths) do
                 local ok, label = pcall(getter)
+
                 if ok and label then
-                    local text = nil
+                    local value = nil
+
                     if typeof(label) == "Instance" then
-                        pcall(function() text = label.Text end)
-                    elseif type(label) == "string" then
-                        text = label
+                        pcall(function()
+                            if label:IsA("TextLabel") or label:IsA("TextButton") then
+                                value = label.Text
+                            elseif label:IsA("IntValue") or label:IsA("NumberValue") then
+                                value = tostring(label.Value)
+                            end
+                        end)
+                    elseif type(label) == "string" or type(label) == "number" then
+                        value = tostring(label)
                     end
-                    if type(text) == "string" then
-                        local h, m, s = text:match("(%d+):(%d+):(%d+)")
-                        if h then
-                            return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
-                        end
-                        local onlySec = tonumber(text:match("(%d+)"))
-                        if onlySec and text:find(":") == nil then
-                            return onlySec
-                        end
+
+                    local seconds = parseTimerText(value)
+                    if seconds ~= nil then
+                        return seconds
                     end
                 end
             end
-            return 0
+
+            -- nil means "timer could not be read", NOT "boost is off".
+            return nil
+        end
+
+        local function rememberGoldActive(seconds)
+            seconds = tonumber(seconds)
+            if not seconds or seconds <= 3 then
+                return
+            end
+
+            goldRuntime.activeUntil = math.max(
+                goldRuntime.activeUntil,
+                tick() + seconds
+            )
+        end
+
+        local function getGoldActiveState(ignorePurchaseLock)
+            local seconds = readBoostTimer("Gold")
+
+            -- The real readable timer always wins over local cache.
+            if seconds ~= nil then
+                if seconds > 3 then
+                    rememberGoldActive(seconds)
+                    goldDebug(
+                        "active",
+                        string.format("ACTIVE | %ds remaining | no buy", math.floor(seconds))
+                    )
+                    return true, seconds
+                end
+
+                -- Timer explicitly says OFF, so clear any stale guessed cache.
+                goldRuntime.activeUntil = 0
+
+                if (not ignorePurchaseLock)
+                    and tick() < goldRuntime.purchaseLockUntil then
+
+                    local remainingLock = math.max(
+                        0,
+                        math.floor(goldRuntime.purchaseLockUntil - tick())
+                    )
+
+                    goldDebug(
+                        "purchase_lock",
+                        string.format("WAITING FOR TIMER UPDATE | lock %ds | no buy", remainingLock)
+                    )
+                    return true, remainingLock
+                end
+
+                goldDebug(
+                    "inactive",
+                    "INACTIVE | real timer says off | eligible for checks"
+                )
+                return false, seconds
+            end
+
+            -- Only trust local active cache when the real timer is unreadable.
+            local cached = math.floor(goldRuntime.activeUntil - tick())
+
+            if cached > 3 then
+                goldDebug(
+                    "cached_active",
+                    string.format(
+                        "ACTIVE (cached because timer unreadable) | %ds remaining | no buy",
+                        cached
+                    )
+                )
+                return true, cached
+            end
+
+            if (not ignorePurchaseLock)
+                and tick() < goldRuntime.purchaseLockUntil then
+
+                local remainingLock = math.max(
+                    0,
+                    math.floor(goldRuntime.purchaseLockUntil - tick())
+                )
+
+                goldDebug(
+                    "purchase_lock",
+                    string.format("WAITING FOR TIMER UPDATE | lock %ds | no buy", remainingLock)
+                )
+                return true, remainingLock
+            end
+
+            goldDebug(
+                "timer_unknown",
+                "TIMER UNREADABLE | safe mode blocks buying"
+            )
+
+            return false, nil
         end
 
         local function isBoostActive(boostType)
-            -- only treat as active if timer clearly running
-            return readBoostTimer(boostType) > 3
+            if boostType == "Gold" then
+                local active = getGoldActiveState()
+                return active
+            end
+
+            local seconds = readBoostTimer(boostType)
+            return seconds ~= nil and seconds > 3
         end
 
         local function getBestTier(boostType)
             for _, tier in ipairs(TIER_PRIORITY) do
-                if BOOST_IDS[boostType][tier] then
-                    return tier, BOOST_IDS[boostType][tier]
+                local ids = BOOST_IDS[boostType]
+                if ids and ids[tier] then
+                    return tier, ids[tier]
                 end
             end
+
             return nil, nil
         end
 
-        local function buyBoost(boostType)
-            -- NEVER buy if boost already active
-            if isBoostActive(boostType) then
-                return nil
-            end
-            local tier, id = getBestTier(boostType)
-            if not tier or not id then
-                return nil
+        local function getTierFromItemName(itemName)
+            for tier, name in pairs(BOOST_ITEMS.Gold) do
+                if name == itemName then
+                    return tier
+                end
             end
 
-            local itemName = BOOST_ITEMS[boostType][tier]
+            return nil
+        end
+
+        -- Uses only the known working inventory remote.
+        -- The old logic tried six different remotes and could trigger the same
+        -- item more than once before the UI timer updated.
+        local function useGoldBoost(itemName, tier, quiet, ignorePurchaseLock)
+            if not itemName then
+                return false
+            end
+
+            local active = getGoldActiveState(ignorePurchaseLock)
+            if active then
+                return false
+            end
+
+            -- Ultra-fast temporary lock only.
+            -- Purchased-item activation is verified from the real timer.
+            local useLock = ignorePurchaseLock and 0.8 or 1.2
+            goldRuntime.purchaseLockUntil = math.max(
+                goldRuntime.purchaseLockUntil,
+                tick() + useLock
+            )
+
+            local ok, result = pcall(function()
+                return GET:InvokeServer(
+                    "S_Inventory",
+                    "Item",
+                    itemName
+                )
+            end)
+
+            if not ok or result == false then
+                goldRuntime.purchaseLockUntil = math.max(
+                    goldRuntime.purchaseLockUntil,
+                    tick() + 0.5
+                )
+
+                goldDebug(
+                    "use_failed",
+                    "USE FAILED | quick retry allowed"
+                )
+                return false
+            end
+
+            goldDebug(
+                "use_waiting",
+                string.format(
+                    "USE SENT | %s | verifying real timer",
+                    tostring(itemName)
+                )
+            )
+
+            -- Nil/no-error from this remote is NOT proof the item was used.
+            -- Confirm activation from the actual Gold timer only.
+            local verifyStarted = tick()
+            local seconds = nil
+
+            repeat
+                task.wait(0.05)
+                seconds = readBoostTimer("Gold")
+
+                if seconds ~= nil and seconds > 3 then
+                    rememberGoldActive(seconds)
+
+                    boostState.used = boostState.used + 1
+                    goldRuntime.lastUseAt = tick()
+
+                    goldDebug(
+                        "used_confirmed",
+                        string.format(
+                            "BOOST CONFIRMED ACTIVE | %ds remaining",
+                            math.floor(seconds)
+                        )
+                    )
+
+                    if not quiet then
+                        Library:Notify("[Boost] Gold boost activated", 2)
+                    end
+
+                    return true
+                end
+            until (tick() - verifyStarted) >= 0.55
+
+            -- No real timer confirmation = do NOT invent a 30m/1h/2h cache.
+            goldRuntime.activeUntil = 0
+            goldRuntime.purchaseLockUntil = math.max(
+                goldRuntime.purchaseLockUntil,
+                tick() + 1.0
+            )
+
+            goldDebug(
+                "use_unconfirmed",
+                string.format(
+                    "USE NOT CONFIRMED | %s | no fake active cache",
+                    tostring(itemName)
+                )
+            )
+
+            return false
+        end
+
+        -- We only buy after the Gold timer has been read as inactive twice.
+        -- If the timer cannot be read, the safe behavior is to NOT buy.
+        local function isGoldConfirmedInactive()
+            local active = getGoldActiveState()
+            if active then
+                return false
+            end
+
+            if tick() < goldRuntime.purchaseLockUntil then
+                return false
+            end
+
+            for check = 1, 2 do
+                local seconds = readBoostTimer("Gold")
+
+                if seconds == nil then
+                    return false
+                end
+
+                if seconds > 3 then
+                    rememberGoldActive(seconds)
+                    return false
+                end
+
+                if check < 2 then
+                    task.wait(0.05)
+                end
+            end
+
+            goldDebug("inactive_confirmed", "INACTIVE CONFIRMED twice | purchase check allowed")
+            return true
+        end
+
+        local function getBoostPrestige()
+            -- Read the real current slot prestige from server data.
+            local ok, data = pcall(function()
+                return GET:InvokeServer("Data", "Copy")
+            end)
+
+            if ok and type(data) == "table" and type(data.Slots) == "table" then
+                local slotName = data.Current_Slot
+                    or Player:GetAttribute("Slot")
+                    or "A"
+
+                local slot = data.Slots[slotName]
+
+                if slot
+                    and slot.Progression
+                    and type(slot.Progression.Prestige) == "number" then
+
+                    return slot.Progression.Prestige
+                end
+            end
+
+            -- Fallback if Data/Copy is temporarily unavailable.
+            local attr = Player:GetAttribute("Prestige")
+            if type(attr) == "number" then
+                return attr
+            end
+
+            return nil
+        end
+
+        local function buyGoldBoost()
+            -- Prestige 5+ should NEVER spend Gold on a new boost.
+            -- Inventory boosts can still be used; this only blocks buying.
+            local prestige = getBoostPrestige()
+            if prestige and prestige >= 5 then
+                goldDebug(
+                    "prestige5_block",
+                    string.format("PRESTIGE %d | buying disabled", prestige)
+                )
+                return nil, nil
+            elseif prestige ~= nil then
+                goldDebug(
+                    "prestige_ok",
+                    string.format("PRESTIGE %d | buying allowed if boost is inactive", prestige)
+                )
+            else
+                goldDebug("prestige_unknown", "PRESTIGE UNKNOWN | checking boost safely")
+            end
+
+            if not isGoldConfirmedInactive() then
+                return nil, nil
+            end
+
+            -- Extra purchase debounce in case a server/UI response is delayed.
+            if tick() - goldRuntime.lastBuyAt < 4 then
+                return nil, nil
+            end
+
+            local tier, id = getBestTier("Gold")
+            if not tier or not id then
+                return nil, nil
+            end
+
+            local itemName = BOOST_ITEMS.Gold[tier]
+
+            goldRuntime.purchaseLockUntil = tick() + 2.0
+
+            goldDebug(
+                "buying",
+                string.format("BUYING | %s | market id %s", tostring(itemName), tostring(id))
+            )
+
             local ok, result = pcall(function()
                 return GET:InvokeServer("S_Market", "Buy", "1_Boosts", id, 1)
             end)
 
-            if ok and result ~= nil and result ~= false then
-                boostState.bought = boostState.bought + 1
-                Library:Notify(string.format("[Boost] Bought %s", itemName), 2)
-                return itemName
+            if not ok or result == false then
+                goldRuntime.purchaseLockUntil = math.max(
+                    goldRuntime.purchaseLockUntil,
+                    tick() + 3
+                )
+
+                goldDebug(
+                    "buy_failed",
+                    string.format(
+                        "BUY REMOTE FAILED | result=%s",
+                        tostring(result)
+                    )
+                )
+
+                return nil, nil
             end
-            return nil
+
+            -- IMPORTANT:
+            -- This market remote can return nil even when the request was
+            -- accepted. pcall success + result ~= false means "request sent".
+            -- We verify the purchase by trying to use the item and checking
+            -- the REAL Gold timer afterwards.
+            goldRuntime.lastBuyAt = tick()
+
+            goldDebug(
+                "buy_sent",
+                string.format(
+                    "BUY REQUEST SENT | %s | result=%s | verifying...",
+                    tostring(itemName),
+                    tostring(result)
+                )
+            )
+
+            return itemName, tier
         end
 
-        local function allBoostItemNames(onlyTypes)
-            -- onlyTypes: map { Gold=true, ... } or nil = all
-            local list = {}
-            local seen = {}
-            for typ, tiers in pairs(BOOST_ITEMS) do
-                if not onlyTypes or onlyTypes[typ] then
-                    for _, name in pairs(tiers) do
-                        if name and not seen[name] then
-                            seen[name] = true
-                            table.insert(list, name)
-                        end
-                    end
-                end
+        -- Try to activate ONE Gold potion from inventory.
+        -- It will never intentionally stack 2-3 inventory boosts anymore.
+        local function tryInventoryGoldOnce()
+            if goldRuntime.inventoryChecked then
+                return false
             end
-            return list
-        end
 
-        local function useBoost(itemName, quiet)
-            local attempts = {
-                function() return GET:InvokeServer("S_Inventory", "Item", itemName) end,
-                function() return GET:InvokeServer("S_Inventory", "Use", itemName) end,
-                function() return GET:InvokeServer("S_Inventory", "Use", "Item", itemName) end,
-                function() return GET:InvokeServer("S_Inventory", "Consume", itemName) end,
-                function() return GET:InvokeServer("S_Items", "Use", itemName) end,
-                function() return GET:InvokeServer("Inventory", "Use", itemName) end,
-            }
-            for i, fn in ipairs(attempts) do
-                local ok, result = pcall(fn)
-                if ok and result ~= false then
-                    -- true or nil both treated as possible success
-                    if result == true or result == "true" or result == 1 or result == nil then
-                        boostState.used = boostState.used + 1
-                        if not quiet then
-                            Library:Notify(string.format("[Boost] Used %s", itemName), 2)
-                        end
+            goldRuntime.inventoryChecked = true
+            goldDebug("inventory_check", "CHECKING INVENTORY for an existing Gold boost")
+
+            local active = getGoldActiveState()
+            if active then
+                return false
+            end
+
+            for _, tier in ipairs(TIER_PRIORITY) do
+                local itemName = BOOST_ITEMS.Gold[tier]
+
+                if itemName then
+                    local used = useGoldBoost(itemName, tier, true)
+
+                    if used then
+                        goldDebug(
+                            "inventory_used",
+                            string.format("INVENTORY BOOST ACTIVATED | %s", tostring(itemName))
+                        )
+                        Library:Notify("[Boost] Gold boost activated from inventory", 2)
                         return true
                     end
+
+                    task.wait(0.15)
                 end
-                task.wait(0.08)
             end
+
             return false
-        end
-
-        -- Activate inventory boosts ONCE per lobby session only
-        local inventoryActivatedThisLobby = false
-
-        local function useAllInventoryBoosts()
-            local usedAny = false
-            -- GOLD ONLY — max 3 remote uses per item name
-            local names = {}
-            for _, name in pairs(BOOST_ITEMS.Gold or {}) do
-                if name then table.insert(names, name) end
-            end
-            for _, name in ipairs(names) do
-                for n = 1, 3 do
-                    local ok = useBoost(name, true)
-                    if not ok then break end
-                    usedAny = true
-                    print("[Boost] used GOLD from inv:", name, n)
-                    task.wait(0.25)
-                end
-            end
-            if usedAny then
-                Library:Notify("[Boost] Activated Gold (once this lobby)", 2)
-            end
-            return usedAny
         end
 
         local function runBoostCycle()
             boostState.cycles = boostState.cycles + 1
 
-            -- 1) Inventory activate ONLY once per lobby join
-            if not inventoryActivatedThisLobby then
-                pcall(useAllInventoryBoosts)
-                inventoryActivatedThisLobby = true
-                task.wait(0.35)
+            if not boostState.selected.Gold then
+                goldDebug("gold_disabled", "Gold toggle OFF")
+                return
             end
 
-            -- 2) Buy only if Gold not active (1), then use
-            local boostType = "Gold"
-            if isBoostActive(boostType) then
-                print("[Boost] Gold active, no buy:", readBoostTimer(boostType))
+            -- Real timer first. If active, do nothing.
+            local active = getGoldActiveState()
+            if active then
+                return
+            end
+
+            -- ULTRA-FAST START:
+            -- The old inventory sweep could spend several seconds testing
+            -- 2h -> 1h -> 30m before it even reached the market purchase.
+            -- For Auto Buy mode we go straight to the market as soon as the
+            -- real Gold timer is confirmed OFF.
+            goldRuntime.inventoryChecked = true
+
+            local boughtName, tier = buyGoldBoost()
+
+            if not boughtName then
+                return
+            end
+
+            -- Market delivery is normally immediate. Only give it a tiny
+            -- settle instead of the old 0.70 second wait.
+            task.wait(0.08)
+
+            -- First instant activation attempt.
+            local activated = useGoldBoost(
+                boughtName,
+                tier,
+                true,
+                true
+            )
+
+            -- One quick retry catches a slightly delayed inventory delivery
+            -- without buying a second boost.
+            if not activated then
+                task.wait(0.08)
+
+                activated = useGoldBoost(
+                    boughtName,
+                    tier,
+                    true,
+                    true
+                )
+            end
+
+            if activated then
+                boostState.bought = boostState.bought + 1
+
+                goldDebug(
+                    "buy_use_confirmed",
+                    string.format(
+                        "FAST BOUGHT + ACTIVE | %s",
+                        tostring(boughtName)
+                    )
+                )
+
+                Library:Notify(
+                    "[Boost] Gold boost ready",
+                    2
+                )
             else
-                local boughtName = buyBoost(boostType)
-                if boughtName then
-                    task.wait(0.55)
-                    for r = 1, 3 do
-                        if useBoost(boughtName, false) then break end
-                        task.wait(0.35)
-                    end
-                    task.wait(0.15)
-                    if isBoostActive(boostType) then
-                        Library:Notify("[Boost] Gold active", 2)
-                    end
-                end
+                goldDebug(
+                    "buy_use_unconfirmed",
+                    string.format(
+                        "FAST BUY SENT | %s | timer not ready yet",
+                        tostring(boughtName)
+                    )
+                )
+
+                -- Short delay only. The 1s main cycle will re-check the real
+                -- timer quickly; duplicate-buy debounce still protects us.
+                goldRuntime.purchaseLockUntil = math.max(
+                    goldRuntime.purchaseLockUntil,
+                    tick() + 1.25
+                )
             end
         end
 
-        -- UI
         local boostLoopRunning = false
 
         local function startBoostLoop()
-            if boostLoopRunning then return end
+            if boostLoopRunning then
+                return
+            end
+
             boostLoopRunning = true
+
             task.spawn(function()
                 while boostState.enabled do
                     pcall(runBoostCycle)
                     task.wait(boostState.cycleDelay)
                 end
+
                 boostLoopRunning = false
             end)
         end
@@ -735,10 +1160,26 @@ if IsLobbyLobby() then
             Default = false,
             Callback = function(v)
                 boostState.enabled = v
+
                 if v then
+                    print("[GoldBoost] AUTO BOOST ENABLED")
+                    lastGoldDebugState = nil
+
+                    -- Clear stale local guesses. A real active timer will
+                    -- immediately repopulate activeUntil on the next check.
+                    goldRuntime.activeUntil = 0
+                    goldRuntime.purchaseLockUntil = 0
+                    goldRuntime.inventoryChecked = false
+
                     Library:Notify("Auto Boost enabled", 2)
                     startBoostLoop()
                 else
+                    print("[GoldBoost] AUTO BOOST DISABLED")
+                    lastGoldDebugState = nil
+
+                    goldRuntime.activeUntil = 0
+                    goldRuntime.purchaseLockUntil = 0
+
                     Library:Notify("Auto Boost disabled", 2)
                 end
             end
@@ -746,9 +1187,9 @@ if IsLobbyLobby() then
 
         BoostGroup:AddSlider("AutoBoost_Delay", {
             Text = "Cycle Delay",
-            Default = 6,
-            Min = 3,
-            Max = 30,
+            Default = 1,
+            Min = 1,
+            Max = 10,
             Rounding = 0,
             Suffix = "s",
             Callback = function(v)
@@ -761,80 +1202,118 @@ if IsLobbyLobby() then
         BoostGroup:AddToggle("AutoBoost_Gold", {
             Text = "Gold Boost",
             Default = true,
-            Callback = function(v) boostState.selected.Gold = v end
+            Callback = function(v)
+                boostState.selected.Gold = v
+            end
         })
 
         BoostGroup:AddToggle("AutoBoost_Luck", {
             Text = "Luck Boost",
-            Default = true,
-            Callback = function(v) boostState.selected.Luck = v end
+            Default = false,
+            Callback = function(v)
+                boostState.selected.Luck = v
+            end
         })
 
         BoostGroup:AddToggle("AutoBoost_XP", {
             Text = "XP Boost",
-            Default = true,
-            Callback = function(v) boostState.selected.XP = v end
+            Default = false,
+            Callback = function(v)
+                boostState.selected.XP = v
+            end
         })
 
         BoostGroup:AddDivider()
 
         BoostGroup:AddButton("Run One Cycle Now", function()
-            Library:Notify("Running one boost cycle...", 2)
             task.spawn(runBoostCycle)
         end)
 
         BoostGroup:AddButton("Check Active Boosts", function()
             local msg = {}
-            for _, t in ipairs({"Gold", "Luck", "XP"}) do
-                local sec = readBoostTimer(t)
-                if sec > 0 then
-                    local h = math.floor(sec / 3600)
-                    local m = math.floor((sec % 3600) / 60)
-                    local s = sec % 60
-                    table.insert(msg, string.format("%s: %02d:%02d:%02d", t, h, m, s))
+
+            for _, boostType in ipairs({"Gold", "Luck", "XP"}) do
+                local seconds
+
+                if boostType == "Gold" then
+                    local active, remaining = getGoldActiveState()
+                    if active then
+                        seconds = remaining
+                    else
+                        seconds = readBoostTimer(boostType)
+                    end
                 else
-                    table.insert(msg, t .. ": off")
+                    seconds = readBoostTimer(boostType)
+                end
+
+                if seconds == nil then
+                    table.insert(msg, boostType .. ": unknown")
+                elseif seconds > 0 then
+                    local h = math.floor(seconds / 3600)
+                    local m = math.floor((seconds % 3600) / 60)
+                    local s = seconds % 60
+
+                    table.insert(
+                        msg,
+                        string.format("%s: %02d:%02d:%02d", boostType, h, m, s)
+                    )
+                else
+                    table.insert(msg, boostType .. ": off")
                 end
             end
+
             Library:Notify(table.concat(msg, " | "), 5)
         end)
 
-        BoostGroup:AddLabel("Gold: 30m=7, 1h=8, 2h=9 | Luck/XP: capture IDs still needed")
+        BoostGroup:AddLabel("Gold FAST mode: direct buy + real timer verification")
 
-        -- Force config reload AFTER these toggles exist so saved values apply on rejoin
+        -- Load saved UI settings after controls exist.
         task.defer(function()
-            task.wait(0.8)
+            task.wait(0.10)
+
             pcall(function()
                 if SaveManager and SaveManager.LoadAutoloadConfig then
                     SaveManager:LoadAutoloadConfig()
                 end
             end)
 
-            -- Re-sync local state from whatever the config just set
-            task.wait(0.15)
+            task.wait(0.03)
+
             pcall(function()
                 if Options and Options.AutoBoost_Enable then
                     boostState.enabled = Options.AutoBoost_Enable.Value
+
                     if boostState.enabled then
                         startBoostLoop()
                     end
                 end
+
                 if Options and Options.AutoBoost_Gold then
                     boostState.selected.Gold = Options.AutoBoost_Gold.Value
                 end
+
                 if Options and Options.AutoBoost_Luck then
                     boostState.selected.Luck = Options.AutoBoost_Luck.Value
                 end
+
                 if Options and Options.AutoBoost_XP then
                     boostState.selected.XP = Options.AutoBoost_XP.Value
                 end
+
                 if Options and Options.AutoBoost_Delay then
                     boostState.cycleDelay = Options.AutoBoost_Delay.Value
                 end
             end)
+
+            -- Seed the Gold cache immediately if a boost is already active.
+            local seconds = readBoostTimer("Gold")
+            if seconds ~= nil and seconds > 3 then
+                rememberGoldActive(seconds)
+            end
         end)
     end)
 end
+
 
 -- ============================================================
 -- Auto Sell Cosmetics (Lobby Only)
@@ -1013,7 +1492,7 @@ if IsLobbyLobby() then
         -- CHANGED:
         --
         -- OLD:
-        -- GET:InvokeServer("S_Equipment", "Talents")
+        -- OLD Talents route disabled because it can consume/roll Memory Scroll
         --
         -- NEW:
         -- GET:InvokeServer(
@@ -7991,13 +8470,27 @@ if Tabs.AutoFarm then
     local BladeTab = AutoFarmTabbox:AddTab("Blade")
 
     BladeTab:AddDropdown("FarmModeDropdown", {
-        Values = {"Tween","Teleport"}, 
+        Values = {"Tween","Teleport","No Movement"}, 
         Default = "",
         Multi = false, 
         Text = "Farm Select",
         Callback = function(val)
             if syncingWeapon then return end
             G.FarmMode = val
+
+            if val == "No Movement" then
+                CleanupSmoothMovement()
+
+                local char = Player.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+                if hrp then
+                    pcall(function()
+                        hrp.AssemblyLinearVelocity = Vector3.zero
+                        hrp.AssemblyAngularVelocity = Vector3.zero
+                    end)
+                end
+            end
         end
     })
 
@@ -8015,29 +8508,6 @@ if Tabs.AutoFarm then
         Text="Kill Hits", Default=9, Min=9, Max=9, Rounding=0,
         Callback=function(val)
             if not syncingWeapon then G.KillHits = val end
-        end
-    })
-
-    BladeTab:AddSlider("HitDistanceSlider", {
-        Text = "Hit Distance",
-        Default = G.HitDistance or 1000,
-        Min = 10,
-        Max = 1000,
-        Rounding = 0,
-        Callback = function(val)
-            if not syncingWeapon then
-                G.HitDistance = val
-            end
-        end
-    })
-
-    BladeTab:AddToggle("HitDistanceToggle", {
-        Text = "Enable Hit Distance",
-        Default = G.HitDistanceEnabled ~= false,
-        Callback = function(v)
-            if not syncingWeapon then
-                G.HitDistanceEnabled = v
-            end
         end
     })
 
@@ -8072,13 +8542,18 @@ if Tabs.AutoFarm then
                     end
                 end
                 
-                if not G.FarmMode or (G.FarmMode ~= "Tween" and G.FarmMode ~= "Teleport") then
+                if not G.FarmMode
+                    or (G.FarmMode ~= "Tween"
+                        and G.FarmMode ~= "Teleport"
+                        and G.FarmMode ~= "No Movement") then
+
                     pcall(function()
                         if Options and Options.AutoFarmBlade then
                             Options.AutoFarmBlade:SetValue(false)
                         end
                     end)
-                    Library:Notify("⚠️ Please select Farm Mode (Tween/Teleport) first!", 3)
+
+                    Library:Notify("⚠️ Please select Farm Mode (Tween/Teleport/No Movement) first!", 3)
                     return
                 end
                 
@@ -8136,10 +8611,12 @@ if Tabs.AutoFarm then
 
     BladeTab:AddToggle("AutoReloadBlade", {
         Text="Auto Reload Blade", Default=false,
-        Callback=function(v) 
+        Callback=function(v)
             if syncingWeapon then return end
-            if v then task.wait(1) end
+
+            -- Enable immediately. The old version waited a full second here.
             G.AutoReloadBlade = v
+
             if not v then
                 getgenv().IsReloading = false
                 getgenv().IsRefilling = false
@@ -8943,6 +9420,13 @@ end
 local function ApplyHitDistanceToTitan(t)
     if not t then return end
     local G = getgenv()
+
+    -- Blade uses the exact standalone remote.
+    -- Do not locally resize Hit/Nape parts while Blade farm is active.
+    if G.AutoFarmBlade then
+        return
+    end
+
     if not G.HitDistanceEnabled then return end
 
     pcall(function()
@@ -9489,21 +9973,32 @@ local function FarmUpdate()
         if isDead then return end
         
         if NeedReload() then
-            local char = Player.Character
-            if char then
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                if hrp then HoverInPlace(hrp) end
+            if G.FarmMode ~= "No Movement" then
+                local char = Player.Character
+                if char then
+                    local hrp = char:FindFirstChild("HumanoidRootPart")
+                    if hrp then HoverInPlace(hrp) end
+                end
+            else
+                CleanupSmoothMovement()
             end
+
             return
         end
         
         if IsRewardsUIVisible() then
-            G.Farm = false
-            pcall(function()
-                if Options and Options.AutoFarmBlade then
-                    Options.AutoFarmBlade:SetValue(false)
-                end
-            end)
+            -- Mission finished: pause this heartbeat only.
+            --
+            -- IMPORTANT:
+            -- Do NOT set G.Farm=false and do NOT turn AutoFarmBlade off.
+            -- Auto Retry can keep the Rewards UI around briefly while the
+            -- next mission is loading. The old code permanently disabled
+            -- Auto Farm during that transition, leaving Auto Retry/Reload
+            -- alive but the farm doing nothing.
+            --
+            -- Keeping AutoFarmBlade + G.Farm enabled lets it automatically
+            -- resume the instant Rewards disappears in the next mission.
+            CurrentEntry = nil
             return
         end
 
@@ -9513,6 +10008,21 @@ local function FarmUpdate()
         local hum = char:FindFirstChildOfClass("Humanoid")
         if not hrp or not hum or hum.Health <= 0 then
             OnDeath()
+            return
+        end
+
+        if G.FarmMode == "No Movement" then
+            CleanupSmoothMovement()
+
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+
+            -- Keep titan state refreshed for the rest of the UI/script,
+            -- but do not move and do not send the original Blade attack.
+            -- The exact Standalone9 worker appended at the end handles damage.
+            ScanTitans()
             return
         end
 
@@ -9768,10 +10278,9 @@ local function SpearFarmUpdate()
         end
         
         if IsRewardsUIVisible() then
-            G.SpearFarm = false
-            if Options and Options.AutoThunderSpearToggle then
-                Options.AutoThunderSpearToggle:SetValue(false)
-            end
+            -- Pause during Rewards, but keep the Auto Spear toggle/state
+            -- alive so Auto Retry can resume it in the next mission.
+            SpearCurrentEntry = nil
             return
         end
 
@@ -9909,6 +10418,56 @@ task.spawn(function()
         local G = getgenv()
         if G.AutoFarmBlade and (not FarmConn or not FarmConn.Connected) then
             CreateFarmLoop()
+        end
+    end
+end)
+
+-- ===== Auto Farm self-heal =====
+-- Keeps Blade Auto Farm alive across Auto Retry / character reloads.
+task.spawn(function()
+    local lastHealPrint = 0
+
+    while task.wait(0.25) do
+        local G = getgenv()
+
+        if G.AutoFarmBlade then
+            local rewardsVisible = false
+            pcall(function()
+                rewardsVisible = IsRewardsUIVisible()
+            end)
+
+            -- During the actual Rewards screen, leave the attack/movement
+            -- paused. As soon as it disappears, fully restore farm state.
+            if not rewardsVisible then
+                local healed = false
+
+                if not G.Farm then
+                    G.Farm = true
+                    G.FarmStartTime = tick()
+                    CurrentEntry = nil
+                    LastAttackTime = 0
+                    healed = true
+                end
+
+                if not FarmConn or not FarmConn.Connected then
+                    CreateFarmLoop()
+                    healed = true
+                end
+
+                local char = Player.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+                if hum and hum.Health > 0 and isDead then
+                    isDead = false
+                    CurrentEntry = nil
+                    healed = true
+                end
+
+                if healed and (tick() - lastHealPrint) > 2 then
+                    lastHealPrint = tick()
+                    print("[AutoFarm] self-recovered")
+                end
+            end
         end
     end
 end)
@@ -10096,10 +10655,9 @@ local function SpearFarmUpdate()
         end
         
         if IsRewardsUIVisible() then
-            G.SpearFarm = false
-            if Options and Options.AutoThunderSpearToggle then
-                Options.AutoThunderSpearToggle:SetValue(false)
-            end
+            -- Pause during Rewards, but keep the Auto Spear toggle/state
+            -- alive so Auto Retry can resume it in the next mission.
+            SpearCurrentEntry = nil
             return
         end
 
@@ -10422,33 +10980,72 @@ task.spawn(function()
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local VIM = game:GetService("VirtualInputManager")
 
-    local COOLDOWN_REFILL = 1.5
-    local COOLDOWN_R_PRESS = 1
-    local FORCE_RELOAD_LOOP_DELAY = 0.1
-    local FORCE_RELOAD_MAX_DURATION = 5
+    local Remotes = ReplicatedStorage
+        :WaitForChild("Assets")
+        :WaitForChild("Remotes")
+
+    local GET = Remotes:WaitForChild("GET")
+    local POST = Remotes:WaitForChild("POST")
+
+    -- ============================================================
+    -- FAST AUTO RELOAD
+    --
+    -- Old version had:
+    --   refill cooldown       = 1.5s
+    --   R cooldown            = 1.0s
+    --   fixed refill wait     = 1.5s
+    --   reload start wait     = 0.3s
+    --   outer action wait     = 0.5s
+    --   outer scan delay      = 0.1s
+    --
+    -- This version reacts/polls instead of sleeping for fixed times.
+    -- ============================================================
+
+    local COOLDOWN_REFILL = 0.25
+    local COOLDOWN_R_PRESS = 0.15
+
+    local REFILL_RETRY_DELAY = 0.08
+    local REFILL_TIMEOUT = 1.10
+
+    local RELOAD_RETRY_DELAY = 0.035
+    local RELOAD_TIMEOUT = 1.25
+
+    local LOOP_DELAY = 0.03
+    local CACHE_REFRESH_INTERVAL = 5
 
     local lastRefillTime = 0
     local lastRPressTime = 0
 
-    local validRefills = {}
-    local lastCacheRefresh = 0
-    local CACHE_REFRESH_INTERVAL = 10
+    local refillBusy = false
+    local reloadBusy = false
 
-    -- Dynamic refill stations (works across maps)
+    local validRefills = {}
+    local refillIndex = 1
+
+    -- ------------------------------------------------------------
+    -- Refill cache
+    -- ------------------------------------------------------------
+
     local function refreshRefillCache()
         local newCache = {}
         local seen = {}
+
         pcall(function()
             local roots = {
                 workspace:FindFirstChild("Unclimbable"),
                 workspace:FindFirstChild("Climbable"),
                 workspace,
             }
+
             for _, root in ipairs(roots) do
                 if root then
                     for _, obj in ipairs(root:GetDescendants()) do
-                        if obj.Name == "Refill" and obj:IsA("BasePart") and not seen[obj] then
+                        if obj.Name == "Refill"
+                            and obj:IsA("BasePart")
+                            and not seen[obj] then
+
                             seen[obj] = true
                             table.insert(newCache, obj)
                         end
@@ -10456,10 +11053,10 @@ task.spawn(function()
                 end
             end
         end)
+
         if #newCache > 0 then
             validRefills = newCache
         end
-        lastCacheRefresh = tick()
     end
 
     refreshRefillCache()
@@ -10467,55 +11064,24 @@ task.spawn(function()
     task.spawn(function()
         while true do
             task.wait(CACHE_REFRESH_INTERVAL)
+
             if getgenv().AutoReloadBlade then
                 refreshRefillCache()
             end
         end
     end)
 
-    local refillIndex = 1
+    -- ------------------------------------------------------------
+    -- Blade state
+    -- ------------------------------------------------------------
 
-    local function PerformRefill()
-        local now = tick()
-        if now - lastRefillTime < COOLDOWN_REFILL then
-            return false
-        end
-
-        local alive = {}
-        for _, r in ipairs(validRefills) do
-            if r and r.Parent then table.insert(alive, r) end
-        end
-        validRefills = alive
-
-        if #validRefills == 0 then
-            refreshRefillCache()
-            if #validRefills == 0 then
-                return false
-            end
-        end
-
-        lastRefillTime = now
-        getgenv().IsRefilling = true
-
-        local target = validRefills[((refillIndex - 1) % #validRefills) + 1]
-        refillIndex = refillIndex + 1
-
-        pcall(function()
-            local POST = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Remotes"):WaitForChild("POST")
-            POST:FireServer("Attacks", "Reload", target)
-        end)
-
-        task.wait(1.5)
-        getgenv().IsRefilling = false
-        return true
-    end
-
-    -- Original-style blade empty check
     local function NeedReload()
-        local char = workspace:FindFirstChild("Characters")
-        if not char then return false end
-        local playerChar = char:FindFirstChild(LocalPlayer.Name)
+        local characters = workspace:FindFirstChild("Characters")
+        if not characters then return false end
+
+        local playerChar = characters:FindFirstChild(LocalPlayer.Name)
         if not playerChar then return false end
+
         local rig = playerChar:FindFirstChild("Rig_" .. LocalPlayer.Name)
         if not rig then return false end
 
@@ -10524,100 +11090,251 @@ task.spawn(function()
 
         if leftHand then
             local blade = leftHand:FindFirstChild("Blade_1")
-            if blade and blade.Transparency == 1 then return true end
+            if blade and blade.Transparency == 1 then
+                return true
+            end
         end
 
         if rightHand then
             local blade = rightHand:FindFirstChild("Blade_1")
-            if blade and blade.Transparency == 1 then return true end
+            if blade and blade.Transparency == 1 then
+                return true
+            end
         end
 
         return false
     end
 
-    -- Original-style sets check (0/3) + soft fallback scan
-    local function isZeroThree()
-        local success, text = pcall(function()
-            local sets = LocalPlayer.PlayerGui.Interface.HUD.Main.Top["7"].Blades.Sets
-            if sets and sets:IsA("TextLabel") then
-                return sets.Text
-            end
-            return ""
-        end)
-        if success and text then
-            local clean = text:gsub("%s+", "")
-            if clean == "0/3" then return true end
-            local a = clean:match("(%d+)/")
-            if a and tonumber(a) == 0 then return true end
-        end
-        -- soft fallback if Top["7"] path missing
-        local found = false
+    local function getBladeSetCount()
+        local count = nil
+
+        -- Fast known path first.
         pcall(function()
-            local top = LocalPlayer.PlayerGui.Interface.HUD.Main.Top
+            local sets =
+                LocalPlayer.PlayerGui
+                .Interface.HUD.Main.Top["7"]
+                .Blades.Sets
+
+            if sets and sets:IsA("TextLabel") and sets.Text then
+                count = tonumber(
+                    tostring(sets.Text)
+                        :gsub("%s+", "")
+                        :match("^(%d+)/")
+                )
+            end
+        end)
+
+        if count ~= nil then
+            return count
+        end
+
+        -- Fallback scan for maps/UI variants.
+        pcall(function()
+            local top =
+                LocalPlayer.PlayerGui
+                .Interface.HUD.Main.Top
+
             if not top then return end
+
             for _, child in ipairs(top:GetChildren()) do
                 local blades = child:FindFirstChild("Blades")
                 local sets = blades and blades:FindFirstChild("Sets")
-                if sets and sets:IsA("TextLabel") and sets.Text then
-                    local a = sets.Text:match("(%d+)%s*/")
-                    if a and tonumber(a) == 0 then
-                        found = true
+
+                if sets
+                    and sets:IsA("TextLabel")
+                    and sets.Text then
+
+                    local n = sets.Text:match("(%d+)%s*/")
+
+                    if n then
+                        count = tonumber(n)
                         return
                     end
                 end
             end
         end)
-        return found
+
+        return count
     end
 
-    -- Original-style R reload (no aggressive set-skipping)
-    local function PressR()
-        local now = tick()
-        if now - lastRPressTime < COOLDOWN_R_PRESS then
-            return
-        end
-        lastRPressTime = now
+    local function isZeroThree()
+        local count = getBladeSetCount()
+        return count ~= nil and count <= 0
+    end
 
+    -- ------------------------------------------------------------
+    -- Fast refill
+    -- ------------------------------------------------------------
+
+    local function PerformRefill()
+        if refillBusy or reloadBusy then
+            return false
+        end
+
+        local now = tick()
+
+        if now - lastRefillTime < COOLDOWN_REFILL then
+            return false
+        end
+
+        -- Remove dead cached parts.
+        local alive = {}
+
+        for _, refill in ipairs(validRefills) do
+            if refill and refill.Parent then
+                table.insert(alive, refill)
+            end
+        end
+
+        validRefills = alive
+
+        if #validRefills == 0 then
+            refreshRefillCache()
+
+            if #validRefills == 0 then
+                return false
+            end
+        end
+
+        lastRefillTime = now
+        refillBusy = true
+        getgenv().IsRefilling = true
+
+        local target =
+            validRefills[((refillIndex - 1) % #validRefills) + 1]
+
+        refillIndex = refillIndex + 1
+
+        local started = tick()
+        local success = false
+
+        -- Send immediately, then poll the set counter. Repeat only while
+        -- the server still reports 0 sets.
+        repeat
+            pcall(function()
+                POST:FireServer(
+                    "Attacks",
+                    "Reload",
+                    target
+                )
+            end)
+
+            task.wait(REFILL_RETRY_DELAY)
+
+            if not isZeroThree() then
+                success = true
+                break
+            end
+
+        until not getgenv().AutoReloadBlade
+            or (tick() - started) >= REFILL_TIMEOUT
+
+        getgenv().IsRefilling = false
+        refillBusy = false
+
+        return success
+    end
+
+    -- ------------------------------------------------------------
+    -- Fast blade reload
+    -- ------------------------------------------------------------
+
+    local function PressR()
+        if reloadBusy or refillBusy then
+            return false
+        end
+
+        local now = tick()
+
+        if now - lastRPressTime < COOLDOWN_R_PRESS then
+            return false
+        end
+
+        lastRPressTime = now
+        reloadBusy = true
         getgenv().IsReloading = true
 
+        -- Keep the original R press because the game/client may expect it.
         pcall(function()
-            local VIM = game:GetService("VirtualInputManager")
-            VIM:SendKeyEvent(true, Enum.KeyCode.R, false, game)
-            task.wait(0.02)
-            VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+            VIM:SendKeyEvent(
+                true,
+                Enum.KeyCode.R,
+                false,
+                game
+            )
+
+            task.wait(0.015)
+
+            VIM:SendKeyEvent(
+                false,
+                Enum.KeyCode.R,
+                false,
+                game
+            )
         end)
 
-        task.wait(0.3)
+        local started = tick()
+        local success = false
 
-        if getgenv().AutoReloadBlade and NeedReload() then
-            local startLoop = tick()
-            while getgenv().AutoReloadBlade and NeedReload() and (tick() - startLoop < FORCE_RELOAD_MAX_DURATION) do
-                pcall(function()
-                    local GET = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Remotes"):WaitForChild("GET")
-                    GET:InvokeServer("Blades", "Reload")
-                end)
-                task.wait(FORCE_RELOAD_LOOP_DELAY)
+        -- No old 0.3s startup delay.
+        -- Send the known reload remote immediately and stop as soon as
+        -- the blade becomes visible again.
+        repeat
+            if not NeedReload() then
+                success = true
+                break
             end
+
+            pcall(function()
+                GET:InvokeServer(
+                    "Blades",
+                    "Reload"
+                )
+            end)
+
+            task.wait(RELOAD_RETRY_DELAY)
+
+        until not getgenv().AutoReloadBlade
+            or (tick() - started) >= RELOAD_TIMEOUT
+
+        if not NeedReload() then
+            success = true
         end
 
-        task.wait(0.2)
         getgenv().IsReloading = false
+        reloadBusy = false
+
+        return success
     end
 
-    while true do
-        if getgenv().AutoReloadBlade then
-            local needReload = NeedReload()
-            local zeroThree = isZeroThree()
+    -- ------------------------------------------------------------
+    -- Main fast loop
+    -- ------------------------------------------------------------
 
-            if needReload and zeroThree then
+    while true do
+        if getgenv().AutoReloadBlade
+            and not reloadBusy
+            and not refillBusy
+            and NeedReload() then
+
+            if isZeroThree() then
                 PerformRefill()
-                task.wait(0.5)
-            elseif needReload then
+
+                -- As soon as the server gives us a new blade set,
+                -- reload the hand blades immediately instead of waiting
+                -- for another 0.5s loop.
+                if getgenv().AutoReloadBlade
+                    and NeedReload()
+                    and not isZeroThree() then
+
+                    PressR()
+                end
+            else
                 PressR()
-                task.wait(0.5)
             end
         end
-        task.wait(0.1)
+
+        task.wait(LOOP_DELAY)
     end
 end)
 if Tabs.Webhook then
@@ -11816,3 +12533,125 @@ end
 
 
 -- ============================================================
+
+-- ============================================================
+-- EXACT STANDALONE 9-TITAN REMOTE - INSTANT / NO WAIT GATES
+--
+-- No mission-start wait.
+-- No blade/reload wait.
+-- No IsReloading / IsRefilling checks.
+-- No movement/farm/objective checks.
+--
+-- Starts sending as soon as valid Titan napes exist and keeps
+-- sending from start to finish.
+-- ============================================================
+
+local ReplicatedStorage_Standalone9 = game:GetService("ReplicatedStorage")
+
+local POST_Standalone9 = ReplicatedStorage_Standalone9
+    :WaitForChild("Assets")
+    :WaitForChild("Remotes")
+    :WaitForChild("POST")
+
+local RUNNING_STANDALONE9 = true
+local INTERVAL_STANDALONE9 = 0.25
+local MAX_TARGETS_STANDALONE9 = 9
+
+local function getStandalone9TargetsExact()
+    local Titans = workspace:FindFirstChild("Titans")
+
+    if not Titans then
+        return {}
+    end
+
+    local targets = {}
+
+    for _, titan in ipairs(Titans:GetChildren()) do
+        if titan:IsA("Model") then
+            local humanoid = titan:FindFirstChildWhichIsA("Humanoid")
+
+            if humanoid and humanoid.Health > 0 then
+                local hitboxes = titan:FindFirstChild("Hitboxes")
+                local hit = hitboxes and hitboxes:FindFirstChild("Hit")
+                local nape = hit and hit:FindFirstChild("Nape")
+
+                if nape and nape:IsA("BasePart") and nape.Parent then
+                    targets[#targets + 1] = nape
+
+                    if #targets >= MAX_TARGETS_STANDALONE9 then
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    return targets
+end
+
+local function isMissionCompleteStandalone9()
+    -- Use the SAME Rewards visibility check as the main farm.
+    -- Do not treat ScreenGui.Enabled by itself as mission completion,
+    -- because that can be true while a mission is still running.
+    local ok, visible = pcall(IsRewardsUIVisible)
+
+    if ok then
+        return visible == true
+    end
+
+    return false
+end
+
+local function hitStandalone9Exact()
+    -- Only stop once the mission is complete / rewards screen is shown.
+    -- No startup waits, reload waits, or blade waits are added.
+    if isMissionCompleteStandalone9() then
+        return
+    end
+
+    local targets = getStandalone9TargetsExact()
+
+    if #targets == 0 then
+        return
+    end
+
+    POST_Standalone9:FireServer(
+        "Attacks",
+        "Slash",
+        true
+    )
+
+    for i = 1, #targets do
+        if isMissionCompleteStandalone9() then
+            return
+        end
+
+        local nape = targets[i]
+
+        if nape and nape.Parent then
+            POST_Standalone9:FireServer(
+                "Hitboxes",
+                "Register",
+                nape,
+                99999,
+                0
+            )
+        end
+    end
+end
+
+while RUNNING_STANDALONE9 do
+    if not isMissionCompleteStandalone9() then
+        hitStandalone9Exact()
+    end
+
+    -- Small scheduler yield so the client stays responsive.
+    -- Still no startup/reload waits; only stops after mission complete.
+    task.wait(INTERVAL_STANDALONE9)
+end
+
+
+task.spawn(function()
+    task.wait(1)
+end)
+
