@@ -128,34 +128,45 @@ task.spawn(function()
 
 
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
-    local TeleportService = game:GetService("TeleportService")
+    local remote = ReplicatedStorage:FindFirstChild("Assets") 
+        and ReplicatedStorage.Assets:FindFirstChild("Remotes") 
+        and ReplicatedStorage.Assets.Remotes:FindFirstChild("POST")
+    
+    if not remote then
 
-    -- Declare watchdog helpers before the first call.
+        local TeleportService = game:GetService("TeleportService")
+        if not checkAnyVisible() then
+            task.wait(10)
+            if not checkAnyVisible() then
+                pcall(function()
+                    TeleportService:Teleport(13379208636, player)
+                end)
+            end
+        end
+        return
+    end
+
     local function IsActuallyVisible(gui)
         if not gui or not gui:IsA("GuiObject") then return false end
         if not gui.Visible then return false end
-
         local current = gui.Parent
         while current do
             if current:IsA("GuiObject") and not current.Visible then return false end
             if current:IsA("ScreenGui") and not current.Enabled then return false end
             current = current.Parent
         end
-
         return true
     end
 
     local function GetGuiByPath(root, pathSegments)
         local current = root
-
-        -- Numeric loop avoids relying on a possibly polluted global ipairs.
-        for index = 1, #pathSegments do
-            if not current then
+        for _, segment in ipairs(pathSegments) do
+            if current then
+                current = current:FindFirstChild(segment)
+            else
                 break
             end
-            current = current:FindFirstChild(pathSegments[index])
         end
-
         return current
     end
 
@@ -165,42 +176,18 @@ task.spawn(function()
     }
 
     local function checkAnyVisible()
-        -- Numeric loop avoids the line-179 "attempt to call a table value"
-        -- failure if an executor/global script has overwritten ipairs.
-        for index = 1, #targets do
-            local target = targets[index]
+        for _, target in ipairs(targets) do
             local gui = GetGuiByPath(playerGui, target.path)
-
             if gui and IsActuallyVisible(gui) then
                 return true
             end
         end
-
         return false
     end
-
-    local remote = ReplicatedStorage:FindFirstChild("Assets")
-        and ReplicatedStorage.Assets:FindFirstChild("Remotes")
-        and ReplicatedStorage.Assets.Remotes:FindFirstChild("POST")
-
-    if not remote then
-        if not checkAnyVisible() then
-            task.wait(10)
-
-            if not checkAnyVisible() then
-                pcall(function()
-                    TeleportService:Teleport(13379208636, player)
-                end)
-            end
-        end
-
-        return
-    end
-
     if not checkAnyVisible() then
         task.wait(10)
-
         if not checkAnyVisible() then
+
             pcall(function()
                 remote:FireServer("Functions", "Teleport", "Menu", nil)
             end)
@@ -252,156 +239,10 @@ player.Idled:Connect(function()
 end)
 ----------------------------------------------------------------------
 
-print("[TownShip] Main source started")
-
--- ============================================================
--- SAFE REMOTE LUA LOADER
---
--- The parser error:
---   Expected identifier when parsing method name, got '//'
--- usually means a URL such as https://... was handed to loadstring
--- as Lua source instead of actual Lua code.
---
--- This loader:
---   * fetches the remote body safely
---   * follows a plain-text URL redirect once
---   * rejects HTML / URL-only responses
---   * gives a readable error instead of the cryptic // parser error
--- ============================================================
-local function getEarlyRequestFunction()
-    if syn and type(syn.request) == "function" then
-        return syn.request
-    end
-
-    if http and type(http.request) == "function" then
-        return http.request
-    end
-
-    if type(http_request) == "function" then
-        return http_request
-    end
-
-    if type(request) == "function" then
-        return request
-    end
-
-    return nil
-end
-
-local function fetchRemoteText(url)
-    local okHttpGet, body = pcall(function()
-        return game:HttpGet(url)
-    end)
-
-    if okHttpGet and type(body) == "string" and #body > 0 then
-        return body
-    end
-
-    local requestFunction = getEarlyRequestFunction()
-
-    if type(requestFunction) == "function" then
-        local okRequest, response = pcall(requestFunction, {
-            Url = url,
-            Method = "GET"
-        })
-
-        if okRequest and type(response) == "table" then
-            local requestBody = response.Body or response.body
-
-            if type(requestBody) == "string" and #requestBody > 0 then
-                return requestBody
-            end
-        end
-    end
-
-    return nil
-end
-
-local function safeLoadRemote(name, url)
-    local body = fetchRemoteText(url)
-
-    if type(body) ~= "string" or body == "" then
-        error("[TownShip] Failed to download " .. tostring(name))
-    end
-
-    -- Some launchers/proxies return only a redirect URL as text.
-    -- If that happens, fetch the destination once instead of compiling
-    -- the literal https://... string as Lua.
-    local redirectUrl = body:match("^%s*(https?://[^%s]+)%s*$")
-
-    if redirectUrl then
-        local redirectedBody = fetchRemoteText(redirectUrl)
-
-        if type(redirectedBody) == "string" and redirectedBody ~= "" then
-            body = redirectedBody
-        end
-    end
-
-    local trimmed = body:match("^%s*(.-)%s*$") or body
-    local lower = string.lower(trimmed:sub(1, 200))
-
-    if trimmed:match("^https?://") then
-        error(
-            "[TownShip] "
-            .. tostring(name)
-            .. " download returned a URL instead of Lua: "
-            .. trimmed:sub(1, 160)
-        )
-    end
-
-    if lower:find("<html", 1, true)
-        or lower:find("<!doctype", 1, true) then
-
-        error(
-            "[TownShip] "
-            .. tostring(name)
-            .. " download returned HTML instead of Lua"
-        )
-    end
-
-    local chunk, compileError = loadstring(body)
-
-    if type(chunk) ~= "function" then
-        error(
-            "[TownShip] Could not compile "
-            .. tostring(name)
-            .. ": "
-            .. tostring(compileError)
-            .. " | response preview: "
-            .. body:sub(1, 180):gsub("[\r\n]", " ")
-        )
-    end
-
-    local okRun, result = pcall(chunk)
-
-    if not okRun then
-        error(
-            "[TownShip] "
-            .. tostring(name)
-            .. " runtime error: "
-            .. tostring(result)
-        )
-    end
-
-    return result
-end
-
-local repo = "https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
-
-local Library = safeLoadRemote(
-    "Linoria Library",
-    repo .. "Library.lua"
-)
-
-local ThemeManager = safeLoadRemote(
-    "ThemeManager",
-    repo .. "addons/ThemeManager.lua"
-)
-
-local SaveManager = safeLoadRemote(
-    "SaveManager",
-    repo .. "addons/SaveManager.lua"
-)
+local repo="https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+local Library=loadstring(game:HttpGet(repo.."Library.lua"))()
+local ThemeManager=loadstring(game:HttpGet(repo.."addons/ThemeManager.lua"))()
+local SaveManager=loadstring(game:HttpGet(repo.."addons/SaveManager.lua"))()
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -410,37 +251,6 @@ local TeleportService = game:GetService("TeleportService")
 local VIM = game:GetService("VirtualInputManager")
 local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
-
--- Resolve only a REAL function. Some executors expose one of these
--- names as a table, which otherwise causes "attempt to call a table value".
-local function ResolveHttpRequest()
-    if syn and type(syn.request) == "function" then
-        return syn.request
-    end
-
-    if http and type(http.request) == "function" then
-        return http.request
-    end
-
-    if type(http_request) == "function" then
-        return http_request
-    end
-
-    if type(request) == "function" then
-        return request
-    end
-
-    return nil
-end
-
-local function SafeHttpRequest(options)
-    local requestFunction = ResolveHttpRequest()
-    if type(requestFunction) ~= "function" then
-        return false, "No supported HTTP request function"
-    end
-
-    return pcall(requestFunction, options)
-end
 
 pcall(function()
     UserInputService.MouseIconEnabled = true
@@ -2206,7 +2016,7 @@ if IsMainmenuLobby() then
             }}
         })
 
-        local requestFunction = ResolveHttpRequest()
+        local requestFunction = (syn and syn.request) or (http and http.request) or http_request or request
         if not requestFunction then return false end
         return pcall(function()
             requestFunction({ Url = webhookURL, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body })
@@ -2239,7 +2049,7 @@ if IsMainmenuLobby() then
             }}
         })
 
-        local requestFunction = ResolveHttpRequest()
+        local requestFunction = (syn and syn.request) or (http and http.request) or http_request or request
         if not requestFunction then return false end
         return pcall(function()
             requestFunction({ Url = webhookURL, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body })
@@ -2273,7 +2083,7 @@ if IsMainmenuLobby() then
             }}
         })
 
-        local requestFunction = ResolveHttpRequest()
+        local requestFunction = (syn and syn.request) or (http and http.request) or http_request or request
         if not requestFunction then return false end
         return pcall(function()
             requestFunction({ Url = webhookURL, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body })
@@ -4793,9 +4603,6 @@ if IsMainmenuLobby() then
     local autoRedeemActive = false
     local autoRedeemTask = nil
 
-    -- Forward declaration: removeSelectedCodes uses this helper before its body.
-    local refreshDropdown
-
     local function saveCodes()
         writefile(codesFile, table.concat(codeList, "\n"))
     end
@@ -4856,7 +4663,7 @@ if IsMainmenuLobby() then
         end
     })
 
-    refreshDropdown = function()
+    local function refreshDropdown()
         codeDropdown:SetValues(codeList)
         selectedCodes = {}
         codeDropdown:SetValue(selectedCodes)
@@ -6556,7 +6363,10 @@ local function SendShadowBanWebhook(reason)
 
 
     local requestFunction =
-        ResolveHttpRequest()
+        (syn and syn.request)
+        or (http and http.request)
+        or http_request
+        or request
 
 
     if not requestFunction then
@@ -6662,7 +6472,10 @@ ShadowBanGroup:AddButton("Test Shadow Ban Webhook", function()
 
 
     local requestFunction =
-        ResolveHttpRequest()
+        (syn and syn.request)
+        or (http and http.request)
+        or http_request
+        or request
 
 
     if not requestFunction then
@@ -9195,13 +9008,6 @@ end)
         return list
     end
 
-    -- Forward declaration because executeCombinedActions schedules this
-
-    -- function before its implementation appears below.
-
-    local startCombinedTimer
-
-
     local function executeCombinedActions()
         if not actionPending then return end
         actionPending = false
@@ -9236,7 +9042,7 @@ end)
         end
     end
 
-    startCombinedTimer = function()
+    local function startCombinedTimer()
         if combinedTimerRunning then return end
 
         local actionsToRun = getSelectedActionsList()
@@ -9882,16 +9688,64 @@ local isDead = false
 local IdleHoverY = 80
 
 local function IsRewardsUIVisible()
-    local success, interface = pcall(function()
-        return Player.PlayerGui:FindFirstChild("Interface")
-    end)
-    if success and interface then
-        local success2, rewards = pcall(function()
-            return interface:FindFirstChild("Rewards")
+    -- Rewards.Visible can stay true even while the mission is running.
+    -- Treat the mission as finished only when the Rewards UI is ACTUALLY
+    -- visible on-screen (all parents visible/enabled + non-zero size).
+    local function IsActuallyVisible(gui)
+        if not gui then return false end
+
+        local ok, visible = pcall(function()
+            if gui:IsA("GuiObject") then
+                if not gui.Visible then return false end
+                if gui.AbsoluteSize.X <= 0 or gui.AbsoluteSize.Y <= 0 then return false end
+            elseif gui:IsA("ScreenGui") then
+                if not gui.Enabled then return false end
+            end
+
+            local current = gui.Parent
+            while current and current ~= game do
+                if current:IsA("GuiObject") and not current.Visible then
+                    return false
+                end
+                if current:IsA("ScreenGui") and not current.Enabled then
+                    return false
+                end
+                current = current.Parent
+            end
+
+            return true
         end)
-        if success2 and rewards and rewards.Visible then return true end
+
+        return ok and visible == true
     end
-    return false
+
+    local ok, rewards = pcall(function()
+        local interface = Player.PlayerGui:FindFirstChild("Interface")
+        return interface and interface:FindFirstChild("Rewards")
+    end)
+
+    if not ok or not rewards or not IsActuallyVisible(rewards) then
+        return false
+    end
+
+    -- Extra confirmation: the Retry button must also really be visible.
+    local retry = nil
+    pcall(function()
+        retry = rewards.Main.Info.Main.Buttons.Retry
+    end)
+
+    if not retry then
+        pcall(function()
+            for _, d in ipairs(rewards:GetDescendants()) do
+                if d.Name == "Retry" and (d:IsA("TextButton") or d:IsA("ImageButton") or d:IsA("GuiButton")) then
+                    retry = d
+                    break
+                end
+            end
+        end)
+    end
+
+    return retry ~= nil and IsActuallyVisible(retry)
 end
 
 local function OnDeath()
@@ -11815,12 +11669,9 @@ if Tabs.Webhook then
                     timestamp = DateTime.now():ToIsoDate()
                 }}
             }
-            SafeHttpRequest({
-                Url = webhookURL,
-                Method = "POST",
-                Headers = { ["Content-Type"] = "application/json" },
-                Body = game:GetService("HttpService"):JSONEncode(payload)
-            })
+            pcall(function()
+                request({ Url = webhookURL, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = game:GetService("HttpService"):JSONEncode(payload) })
+            end)
             return
         end
         
@@ -11877,16 +11728,15 @@ if Tabs.Webhook then
             }}
         }
         
-        local webhookSent = SafeHttpRequest({
-            Url = webhookURL,
-            Method = "POST",
-            Headers = { ["Content-Type"] = "application/json" },
-            Body = game:GetService("HttpService"):JSONEncode(payload)
-        })
-        
-        if webhookSent then
+        pcall(function()
+            request({ 
+                Url = webhookURL, 
+                Method = "POST", 
+                Headers = { ["Content-Type"] = "application/json" }, 
+                Body = game:GetService("HttpService"):JSONEncode(payload) 
+            })
             print("📤 Webhook sent successfully!")
-        end
+        end)
     end
     
     -- ===== ฟังก์ชัน getAllRewards (ใช้ในกรณี fallback) =====
@@ -12190,12 +12040,9 @@ if Tabs.Webhook then
                 footer = {text = os.date("%Y-%m-%d %H:%M:%S")}
             }}
         })
-        SafeHttpRequest({
-            Url = webhookURL,
-            Method = "POST",
-            Headers = {["Content-Type"] = "application/json"},
-            Body = body
-        })
+        pcall(function()
+            request({Url = webhookURL, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = body})
+        end)
     end
     
     -- ===== เชื่อมต่อ Event เมื่อ Rewards เปิด =====
@@ -12298,18 +12145,10 @@ if Tabs.Webhook then
                 footer = {text = "TownShip Webhook Test"}
             }}
         })
-        local testSent = SafeHttpRequest({
-            Url = webhookURL,
-            Method = "POST",
-            Headers = {["Content-Type"] = "application/json"},
-            Body = testBody
-        })
-        
-        if testSent then
+        pcall(function()
+            request({Url = webhookURL, Method = "POST", Headers = {["Content-Type"] = "application/json"}, Body = testBody})
             Library:Notify("Test webhook sent!", 2)
-        else
-            Library:Notify("Test webhook failed: no valid HTTP request function.", 3)
-        end
+        end)
     end)
 end
 if IsIngameLobby() and Tabs.Webhook then
@@ -12850,12 +12689,14 @@ local function hitStandalone9Exact()
 end
 
 while RUNNING_STANDALONE9 do
-    if not isMissionCompleteStandalone9() then
+    -- Keep the original working Titan-kill remote exactly as-is,
+    -- but only allow it to send while Auto Farm Blade is enabled.
+    if getgenv().AutoFarmBlade and not isMissionCompleteStandalone9() then
         hitStandalone9Exact()
     end
 
-    -- Small scheduler yield so the client stays responsive.
-    -- Still no startup/reload waits; only stops after mission complete.
+    -- When Auto Farm Blade is OFF, or Rewards is visible,
+    -- no Titan kill remote is sent.
     task.wait(INTERVAL_STANDALONE9)
 end
 
@@ -12863,3 +12704,4 @@ end
 task.spawn(function()
     task.wait(1)
 end)
+
