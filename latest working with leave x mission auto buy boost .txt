@@ -252,10 +252,156 @@ player.Idled:Connect(function()
 end)
 ----------------------------------------------------------------------
 
-local repo="https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
-local Library=loadstring(game:HttpGet(repo.."Library.lua"))()
-local ThemeManager=loadstring(game:HttpGet(repo.."addons/ThemeManager.lua"))()
-local SaveManager=loadstring(game:HttpGet(repo.."addons/SaveManager.lua"))()
+print("[TownShip] Main source started")
+
+-- ============================================================
+-- SAFE REMOTE LUA LOADER
+--
+-- The parser error:
+--   Expected identifier when parsing method name, got '//'
+-- usually means a URL such as https://... was handed to loadstring
+-- as Lua source instead of actual Lua code.
+--
+-- This loader:
+--   * fetches the remote body safely
+--   * follows a plain-text URL redirect once
+--   * rejects HTML / URL-only responses
+--   * gives a readable error instead of the cryptic // parser error
+-- ============================================================
+local function getEarlyRequestFunction()
+    if syn and type(syn.request) == "function" then
+        return syn.request
+    end
+
+    if http and type(http.request) == "function" then
+        return http.request
+    end
+
+    if type(http_request) == "function" then
+        return http_request
+    end
+
+    if type(request) == "function" then
+        return request
+    end
+
+    return nil
+end
+
+local function fetchRemoteText(url)
+    local okHttpGet, body = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if okHttpGet and type(body) == "string" and #body > 0 then
+        return body
+    end
+
+    local requestFunction = getEarlyRequestFunction()
+
+    if type(requestFunction) == "function" then
+        local okRequest, response = pcall(requestFunction, {
+            Url = url,
+            Method = "GET"
+        })
+
+        if okRequest and type(response) == "table" then
+            local requestBody = response.Body or response.body
+
+            if type(requestBody) == "string" and #requestBody > 0 then
+                return requestBody
+            end
+        end
+    end
+
+    return nil
+end
+
+local function safeLoadRemote(name, url)
+    local body = fetchRemoteText(url)
+
+    if type(body) ~= "string" or body == "" then
+        error("[TownShip] Failed to download " .. tostring(name))
+    end
+
+    -- Some launchers/proxies return only a redirect URL as text.
+    -- If that happens, fetch the destination once instead of compiling
+    -- the literal https://... string as Lua.
+    local redirectUrl = body:match("^%s*(https?://[^%s]+)%s*$")
+
+    if redirectUrl then
+        local redirectedBody = fetchRemoteText(redirectUrl)
+
+        if type(redirectedBody) == "string" and redirectedBody ~= "" then
+            body = redirectedBody
+        end
+    end
+
+    local trimmed = body:match("^%s*(.-)%s*$") or body
+    local lower = string.lower(trimmed:sub(1, 200))
+
+    if trimmed:match("^https?://") then
+        error(
+            "[TownShip] "
+            .. tostring(name)
+            .. " download returned a URL instead of Lua: "
+            .. trimmed:sub(1, 160)
+        )
+    end
+
+    if lower:find("<html", 1, true)
+        or lower:find("<!doctype", 1, true) then
+
+        error(
+            "[TownShip] "
+            .. tostring(name)
+            .. " download returned HTML instead of Lua"
+        )
+    end
+
+    local chunk, compileError = loadstring(body)
+
+    if type(chunk) ~= "function" then
+        error(
+            "[TownShip] Could not compile "
+            .. tostring(name)
+            .. ": "
+            .. tostring(compileError)
+            .. " | response preview: "
+            .. body:sub(1, 180):gsub("[\r\n]", " ")
+        )
+    end
+
+    local okRun, result = pcall(chunk)
+
+    if not okRun then
+        error(
+            "[TownShip] "
+            .. tostring(name)
+            .. " runtime error: "
+            .. tostring(result)
+        )
+    end
+
+    return result
+end
+
+local repo = "https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+
+local Library = safeLoadRemote(
+    "Linoria Library",
+    repo .. "Library.lua"
+)
+
+local ThemeManager = safeLoadRemote(
+    "ThemeManager",
+    repo .. "addons/ThemeManager.lua"
+)
+
+local SaveManager = safeLoadRemote(
+    "SaveManager",
+    repo .. "addons/SaveManager.lua"
+)
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
