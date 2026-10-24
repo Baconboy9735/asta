@@ -88,7 +88,7 @@ getgenv().TownShipConfig = {
                 "Time Trial",        -- Enables the Time Trial modifier.
             },
 
-            Delay = 5,               -- Seconds the mission starter waits between/start around mission actions.
+            Delay = 10,               -- Seconds the mission starter waits between/start around mission actions.
             WavesDelay = 0,          -- Extra delay in seconds for wave actions.
         },
 
