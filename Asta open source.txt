@@ -37,7 +37,7 @@ getgenv().TownShipConfig = {
         HideUI = true,               -- Compatibility setting from the old UI version; headless mode has no menu to show.
         MobileUI = true,             -- Enables old mobile-UI compatibility behavior where supported.
 
-        Slot = "A",                  -- Character slot to automatically select. Example: "A".
+        Slot = "B",                  -- Character slot to automatically select. Example: "A".
         SelectDelay = 1,             -- Seconds to wait before the slot Select remote is sent.
 
         JoinDestination = "Lobby",   -- Destination used by AutoJoin. Example: "Lobby".
